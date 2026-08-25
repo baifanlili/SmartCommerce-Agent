@@ -1,0 +1,10 @@
+.git
+.env
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+node_modules
+dist
+docs-private
+AGENTS.md

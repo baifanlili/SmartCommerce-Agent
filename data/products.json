@@ -1,0 +1,8 @@
+[
+  {"id": 10001, "name": "ThinkPad T14 Gen 5", "category": "Laptop", "brand": "Lenovo", "price": 4899, "rating": 4.8, "review_count": 2841, "tags": ["程序员", "商务办公", "Linux", "长续航"], "highlights": ["32GB 内存", "1TB SSD", "14 英寸 2.8K 屏", "高规格键盘"], "description": "面向开发和高强度办公的稳定型笔记本，键盘手感好，扩展性强。"},
+  {"id": 10002, "name": "MacBook Air 15", "category": "Laptop", "brand": "Apple", "price": 7999, "rating": 4.7, "review_count": 5320, "tags": ["程序员", "轻薄", "长续航", "macOS"], "highlights": ["M3 芯片", "16GB 内存", "15.3 英寸屏幕", "最长 18 小时续航"], "description": "轻薄安静的开发与创作设备，适合重视便携和续航的用户。"},
+  {"id": 10003, "name": "ASUS ProArt 27 4K", "category": "Monitor", "brand": "ASUS", "price": 2699, "rating": 4.6, "review_count": 1168, "tags": ["设计", "程序员", "4K", "护眼"], "highlights": ["27 英寸 4K", "98% DCI-P3", "USB-C 一线连接", "人体工学支架"], "description": "兼顾代码、设计和影音体验的 4K 显示器，接口和支架配置完整。"},
+  {"id": 10004, "name": "Sony WH-1000XM6", "category": "Audio", "brand": "Sony", "price": 2499, "rating": 4.8, "review_count": 3782, "tags": ["降噪", "通勤", "音乐", "长续航"], "highlights": ["旗舰降噪", "30 小时续航", "多设备连接", "舒适佩戴"], "description": "适合通勤和专注工作的旗舰降噪耳机，声音细节和佩戴体验突出。"},
+  {"id": 10005, "name": "Pixel 9 Pro", "category": "Phone", "brand": "Google", "price": 5699, "rating": 4.5, "review_count": 2046, "tags": ["摄影", "AI", "Android", "小屏"], "highlights": ["Tensor G4", "专业三摄", "6.3 英寸 OLED", "7 年系统更新"], "description": "强调影像和 AI 能力的 Android 旗舰，机身尺寸适中，系统更新周期长。"},
+  {"id": 10006, "name": "Dell XPS 13 Plus", "category": "Laptop", "brand": "Dell", "price": 6299, "rating": 4.4, "review_count": 1537, "tags": ["轻薄", "程序员", "商务办公", "Windows"], "highlights": ["Core Ultra 7", "32GB 内存", "13.4 英寸 OLED", "1.2kg 机身"], "description": "兼顾移动办公和开发性能的轻薄本，屏幕素质优秀，机身便于携带。"}
+]

@@ -15,6 +15,10 @@ frontend/vite.config.d.ts
 # Local environment
 .env
 
+# Personal Git learning automation (kept out of the public repository)
+.githooks/
+scripts/
+
 # IDE and OS
 .idea/
 .vscode/

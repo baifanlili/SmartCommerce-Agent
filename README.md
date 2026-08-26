@@ -10,6 +10,8 @@
 - 本地商品样例数据和预算、品类筛选
 - Redis 会话记忆基础设施
 - 无需大模型密钥即可运行的 Mock 推荐引擎
+- request_id/trace_id 请求链路标识、统一结构化错误和存活/就绪健康检查
+- Docker 后端测试、Node 20 前端构建和 Mock API 压测基线
 - Docker Compose 一键启动
 
 当前阶段使用仓库内的小型样例数据，目的是让 Mock 回归、接口测试和 API 压测稳定可重复。开源商品/评价数据集不会在 `v0.1.0` 直接混入运行时，而是在 `v0.3.0` 的 Taro 用户 MVP、RAG 与长期记忆阶段正式接入。届时会先核验许可证和隐私风险，再固定数据快照，执行下载、清洗、去重、字段标准化、质量校验、脱敏和向量索引构建。原始数据和大体积索引不提交 Git，也不让生产环境直接依赖临时下载地址。
@@ -105,7 +107,7 @@ Spring Cloud 业务层建议统一使用 Spring Cloud Gateway、Nacos、OpenFeig
 
 ## 一键启动
 
-环境要求：安装并启动 Docker Desktop。
+环境要求：安装并启动 Docker Desktop。项目本地构建、测试和运行时验收统一使用 Docker 提供的 Python 3.12、Node 20 和 Redis 环境；不要求本机额外安装 Python 或 Node.js。
 
 在项目根目录执行：
 
@@ -120,6 +122,30 @@ docker compose up --build
 - 后端健康检查：http://localhost:8000/health
 
 首次启动会构建前后端镜像并下载 Redis 镜像，可能需要几分钟。
+
+## 健康检查与错误约定
+
+健康检查区分存活与就绪：
+
+- `/health/live`：进程存活检查，不依赖 Redis。
+- `/health/ready`：就绪检查，包含 Redis 状态；Redis 不可用时返回 `503` 和 `degraded`。
+- `/health`：就绪检查的兼容别名。
+
+所有响应都包含 `X-Request-ID` 和 `X-Trace-ID` 响应头；未携带请求头时自动生成，并同步写入结构化日志。错误响应统一为：
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "请求参数校验失败",
+    "request_id": "…",
+    "trace_id": "…",
+    "details": []
+  }
+}
+```
+
+常用错误码包括 `VALIDATION_ERROR`、`BAD_REQUEST`、`NOT_FOUND`、`TOO_MANY_REQUESTS` 和 `INTERNAL_ERROR`，内部异常不会向客户端泄露细节。
 
 ## 部署路线
 
@@ -199,17 +225,16 @@ npm run dev
 
 ## 测试
 
-后端测试：
+后端测试（Python 3.12 测试容器）：
 
 ```powershell
-pytest
+docker compose --profile test run --rm api-test
 ```
 
-前端构建检查：
+前端构建检查（Node 20 构建容器）：
 
 ```powershell
-cd frontend
-npm run build
+docker compose build web
 ```
 
 Compose 配置检查：
@@ -217,6 +242,30 @@ Compose 配置检查：
 ```powershell
 docker compose config
 ```
+
+Mock API 最小压测（10 并发、200 请求，基线写入 `benchmark/results/`）：
+
+```powershell
+docker compose --profile bench run --rm api-bench
+```
+
+完整的 `v0.1.0` 本地验收：
+
+```powershell
+docker compose up --build -d
+docker compose --profile test run --rm api-test
+docker compose build web
+docker compose --profile bench run --rm api-bench
+docker compose ps
+```
+
+验收结束后停止服务：
+
+```powershell
+docker compose down
+```
+
+CI 也会执行后端测试、前端构建、Compose 配置检查和 API/Web 镜像构建。生产镜像不包含测试依赖，`api-test` 只用于本地和 CI 验证。
 
 压测按 API 基准、Agent 流程、记忆读写、异步任务、依赖故障和真实模型六层推进。每次记录并发数、持续时间、成功率、吞吐量、P50/P95/P99、超时率、依赖错误率、Token 消耗和资源使用率；具体 SLO 以实测基线为依据。
 

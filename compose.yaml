@@ -14,11 +14,36 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
       interval: 10s
       timeout: 5s
       retries: 6
       start_period: 10s
+
+  api-test:
+    profiles: [test]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.test
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      LLM_PROVIDER: mock
+      LLM_API_KEY: ""
+      LLM_MODEL: ""
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  api-bench:
+    profiles: [bench]
+    image: python:3.12-slim
+    working_dir: /benchmark
+    volumes:
+      - ./benchmark:/benchmark
+    command: ["python", "api_load.py", "--base-url", "http://api:8000", "--concurrency", "10", "--requests", "200", "--output", "results/api-baseline-v0.1.0.json"]
+    depends_on:
+      api:
+        condition: service_healthy
 
   web:
     build:

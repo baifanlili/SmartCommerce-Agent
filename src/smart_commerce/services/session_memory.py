@@ -1,8 +1,10 @@
 import json
+import logging
 from collections import defaultdict
 
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
+
+logger = logging.getLogger(__name__)
 
 
 class SessionMemory:
@@ -15,12 +17,14 @@ class SessionMemory:
         try:
             await self.redis.rpush(f"smart-commerce:session:{session_id}", json.dumps(item, ensure_ascii=False))
             await self.redis.expire(f"smart-commerce:session:{session_id}", 60 * 60 * 24)
-        except RedisError:
+        except Exception:
+            logger.warning("redis_append_failed session_id=%s role=%s", session_id, role, exc_info=True)
             self.local_history[session_id].append(item)
 
     async def status(self) -> str:
         try:
             await self.redis.ping()
             return "ok"
-        except RedisError:
+        except Exception:
+            logger.warning("redis_status_failed", exc_info=True)
             return "fallback"

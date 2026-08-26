@@ -1,0 +1,30 @@
+{
+  "scenario": "v0.1.0_api_baseline",
+  "endpoint": "POST /api/v1/chat",
+  "payload": {
+    "session_id": "bench-v0.1.0",
+    "message": "推荐一台5000元以内适合程序员的笔记本"
+  },
+  "concurrency": 10,
+  "total_requests": 200,
+  "successful_requests": 200,
+  "failed_requests": 0,
+  "success_rate": 1.0,
+  "duration_seconds": 0.392,
+  "throughput_rps": 510.48,
+  "latency_ms": {
+    "mean": 18.77,
+    "p50": 18.39,
+    "p95": 25.36,
+    "p99": 28.71,
+    "max": 29.45
+  },
+  "timeout_requests": 0,
+  "observability_headers_present": 200,
+  "error_samples": [],
+  "environment": {
+    "llm_provider": "mock",
+    "python": "3.12.14"
+  },
+  "run_at": "2026-08-26T07:20:30.168129+00:00"
+}

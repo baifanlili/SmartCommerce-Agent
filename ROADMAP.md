@@ -203,7 +203,7 @@ dev → uat → prod
 
 | 版本 | 定位 | 核心结果 | 状态 |
 |---|---|---|---|
-| `v0.1.0` | 生产级 Agent 基线原型 | Docker/Compose、健康检查、外部配置、Mock LLM、Redis 会话和 Vite Web 技术验证端；生产级错误码、请求/Trace ID 与压测基线已纳入约束并持续补齐 | 基础闭环已完成 |
+| `v0.1.0` | 生产级 Agent 基线原型 | Docker/Compose、存活/就绪健康检查、外部配置、Mock LLM、Redis 会话和 Vite Web 技术验证端；`request_id`/`trace_id`、统一结构化错误、Docker 测试验收和 Mock API 压测基线已完成 | 基线验收已完成 |
 | `v0.2.0` | 真实模型与稳定协议 | 可配置 LLM、结构化输出、模型降级、统一错误处理、身份凭证协议 | 计划中 |
 | `v0.3.0` | Taro 用户 MVP、RAG 与 Python 长期记忆 | Taro 客户端、用户身份接入、开源数据集管道、商品知识、评价检索、RAG、历史会话和长期记忆 | 计划中 |
 | `v0.4.0` | Agent 编排与动态运行时 | LangGraph、Supervisor、意图识别、规划路由、结果汇总、Agent Registry、动态 Agent 模板和工具白名单 | 计划中 |
@@ -248,15 +248,17 @@ dev → uat → prod
 - Mock 推荐模式，不配置模型密钥也能运行。
 - Web、API、Redis 的 Docker Compose 一键启动。
 - 后端单元/API 测试和前端构建检查。
-- API 无状态约束、健康检查、结构化错误码、请求 ID/Trace ID 和外部配置的设计基线。
-- Mock LLM API 基准压测方案，记录并发、吞吐、P95/P99、错误率和资源使用率。
+- API 无状态约束、存活/就绪健康检查、`request_id`/`trace_id` 链路标识、统一结构化错误和外部配置基线。
+- Docker 后端测试、Node 20 前端构建验收，以及 Mock LLM API 基准压测（10 并发、200 请求基线）。
 
 ### 验收标准
 
-- 执行 `docker compose up --build` 后，前端、API 和 Redis 正常启动。
+- 执行 `docker compose up --build` 后，前端、API 和 Redis 正常启动，API 健康状态为 `healthy`。
 - 用户可以在页面输入购物需求并看到推荐商品卡片。
-- API 错误和 Redis 状态可以被明确识别。
-- Mock 模式下测试结果稳定、可重复。
+- `/health/live` 不依赖 Redis，`/health/ready` 能明确识别 Redis 状态。
+- 所有响应包含 `X-Request-ID`/`X-Trace-ID`，错误使用统一结构化格式。
+- `docker compose --profile test run --rm api-test` 和 `docker compose build web` 通过。
+- Mock 模式压测稳定可重复，基线记录在 `benchmark/results/`。
 
 ### 暂不做
 
@@ -264,7 +266,7 @@ dev → uat → prod
 - 完整用户注册登录、管理员后台和生产级权限系统；当前仅使用匿名 `session_id`。
 - 动态生成可执行代码的 Agent。
 
-**状态：基础闭环已完成；生产级观测和压测能力按路线持续补齐。**
+**状态：`v0.1.0` 生产级工程基线验收完成，后续版本在 Mock 回归和压测基线上继续演进。**
 
 ## `v0.2.0`：真实模型与稳定协议
 

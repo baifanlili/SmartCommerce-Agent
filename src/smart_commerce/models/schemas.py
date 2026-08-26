@@ -33,3 +33,20 @@ class ChatResponse(BaseModel):
     recommendations: list[Product]
     steps: list[AgentStep]
     mode: Literal["mock", "llm"] = "mock"
+
+
+class ErrorDetail(BaseModel):
+    field: str | None = None
+    message: str
+
+
+class ApiErrorBody(BaseModel):
+    code: str
+    message: str
+    request_id: str | None = None
+    trace_id: str | None = None
+    details: list[ErrorDetail] = Field(default_factory=list)
+
+
+class ApiErrorResponse(BaseModel):
+    error: ApiErrorBody

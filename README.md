@@ -200,7 +200,9 @@ docker compose down -v
 Copy-Item .env.example .env
 ```
 
-当前 `LLM_PROVIDER=mock` 时不需要填写模型密钥。后续接入 Qwen、DeepSeek 或 GPT 时，再配置 `LLM_PROVIDER`、`LLM_API_KEY` 和 `LLM_MODEL`。
+默认 `.env.example` 使用不需要密钥的 Mock 模式。本机接入 DeepSeek 时，配置 `LLM_PROVIDER=deepseek`、`LLM_API_KEY` 和 `LLM_MODEL=deepseekflash`。协议默认使用 Chat Completions；DeepSeek 的 Responses API 可以通过 `LLM_API_MODE=responses` 选择。API 请求失败会按配置重试，仍失败时自动回退到 Mock，避免购物演示整体不可用。密钥只放在本机 `.env`，不要提交到 Git。
+
+模型配置既可以通过环境变量注入，也可以在管理员配置台中运行期调整。配置台支持 Mock/DeepSeek、Chat Completions/Responses、模型名称、Base URL、超时、重试次数、连接测试、保存草稿和启用配置；API Key 只接收和使用，读取时仅返回脱敏结果。管理员接口需要 `X-Admin-Token`，由 `ADMIN_TOKEN` 注入。当前配置草稿和启用状态仅保存在单个 API 进程内，尚未接入加密持久化、管理员账号体系、审计日志和多副本同步，因此只适合作为 v0.2 的开发验证能力。
 
 ## 本地开发
 

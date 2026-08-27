@@ -7,7 +7,12 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_MODEL: ${LLM_MODEL:-deepseekflash}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      LLM_API_MODE: ${LLM_API_MODE:-chat}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -29,7 +34,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       LLM_PROVIDER: mock
       LLM_API_KEY: ""
-      LLM_MODEL: ""
+      LLM_MODEL: deepseekflash
+      LLM_BASE_URL: https://api.deepseek.com/v1
+      LLM_API_MODE: chat
+      LLM_TIMEOUT_SECONDS: 30
+      LLM_MAX_RETRIES: 2
     depends_on:
       redis:
         condition: service_healthy

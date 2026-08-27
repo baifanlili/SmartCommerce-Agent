@@ -32,3 +32,21 @@ export type Message = {
   recommendations?: Product[]
   steps?: AgentStep[]
 }
+
+export type AdminLLMConfig = {
+  provider: 'mock' | 'deepseek'
+  api_mode: 'chat' | 'responses'
+  model: string
+  base_url: string
+  timeout_seconds: number
+  max_retries: number
+  api_key_configured: boolean
+  api_key_masked: string | null
+  is_active: boolean
+}
+
+export type AdminConnectionTest = {
+  ok: boolean
+  message: string
+  mode: 'mock' | 'llm'
+}

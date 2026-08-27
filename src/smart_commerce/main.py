@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from smart_commerce.agents.shopping_agents import ShoppingSupervisor
+from smart_commerce.agents.shopping_agents import supervisor_from_settings
 from smart_commerce.api.routes import router
 from smart_commerce.core.config import get_settings
 from smart_commerce.core.errors import register_exception_handlers
@@ -10,6 +10,7 @@ from smart_commerce.core.logging import setup_logging
 from smart_commerce.core.middleware import request_context_middleware
 from smart_commerce.repositories.product_repository import ProductRepository
 from smart_commerce.services.session_memory import SessionMemory
+from smart_commerce.services.runtime_config import RuntimeLLMConfigStore
 
 setup_logging()
 
@@ -20,7 +21,9 @@ app.middleware("http")(request_context_middleware)
 register_exception_handlers(app)
 app.include_router(router)
 app.state.product_repository = ProductRepository()
-app.state.supervisor = ShoppingSupervisor(app.state.product_repository)
+app.state.settings = settings
+app.state.llm_config_store = RuntimeLLMConfigStore(settings)
+app.state.supervisor = supervisor_from_settings(app.state.product_repository, settings)
 app.state.session_memory = SessionMemory(settings.redis_url)
 
 

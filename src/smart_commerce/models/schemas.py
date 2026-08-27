@@ -50,3 +50,31 @@ class ApiErrorBody(BaseModel):
 
 class ApiErrorResponse(BaseModel):
     error: ApiErrorBody
+
+
+class AdminLLMConfigWrite(BaseModel):
+    provider: Literal["mock", "deepseek"] = "mock"
+    api_key: str | None = Field(default=None, max_length=500)
+    model: str = Field(default="deepseekflash", min_length=1, max_length=100)
+    base_url: str = Field(default="https://api.deepseek.com/v1", min_length=1, max_length=500)
+    api_mode: Literal["chat", "responses"] = "chat"
+    timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    max_retries: int = Field(default=2, ge=0, le=5)
+
+
+class AdminLLMConfigView(BaseModel):
+    provider: Literal["mock", "deepseek"]
+    api_mode: Literal["chat", "responses"]
+    model: str
+    base_url: str
+    timeout_seconds: float
+    max_retries: int
+    api_key_configured: bool
+    api_key_masked: str | None = None
+    is_active: bool
+
+
+class AdminConnectionTestResponse(BaseModel):
+    ok: bool
+    message: str
+    mode: Literal["mock", "llm"]

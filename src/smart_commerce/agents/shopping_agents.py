@@ -1,7 +1,12 @@
 import re
+import logging
 
+from smart_commerce.core.config import Settings
 from smart_commerce.models.schemas import AgentStep, Product
 from smart_commerce.repositories.product_repository import ProductRepository
+from smart_commerce.services.llm_provider import LLMProvider, LLMProviderError, MockLLMProvider, build_llm_provider
+
+logger = logging.getLogger(__name__)
 
 
 class ProductAgent:
@@ -37,30 +42,36 @@ class ProductAgent:
         return None
 
 
-class RecommendAgent:
-    name = "recommend"
-    label = "智能推荐"
-
-    def explain(self, message: str, products: list[Product]) -> str:
-        if not products:
-            return "我暂时没有找到完全匹配的商品，可以放宽预算或换一个品类试试。"
-        budget = ProductAgent._extract_budget(message)
-        budget_text = f"，并控制在 ¥{budget:,.0f} 以内" if budget else ""
-        names = "、".join(product.name for product in products)
-        return f"我根据你的需求{budget_text}筛选了 {names}。优先推荐列表中的第一款，它在评分、核心配置和价格之间更均衡。"
-
-
 class ShoppingSupervisor:
-    def __init__(self, repository: ProductRepository) -> None:
+    def __init__(self, repository: ProductRepository, llm_provider: LLMProvider | None = None) -> None:
         self.product_agent = ProductAgent(repository)
-        self.recommend_agent = RecommendAgent()
+        self.llm_provider = llm_provider or MockLLMProvider()
 
-    def run(self, message: str) -> tuple[str, list[Product], list[AgentStep]]:
+    async def run(self, message: str) -> tuple[str, list[Product], list[AgentStep], str]:
         products = self.product_agent.search(message)
-        reply = self.recommend_agent.explain(message, products)
+        mode = "mock" if self.llm_provider.name == "mock" else "llm"
+        try:
+            reply = await self.llm_provider.generate_reply(message, products)
+        except LLMProviderError:
+            logger.warning("llm_reply_failed provider=%s fallback=mock", self.llm_provider.name, exc_info=True)
+            reply = await MockLLMProvider().generate_reply(message, products)
+            mode = "mock"
         steps = [
             AgentStep(agent="supervisor", label="需求理解"),
             AgentStep(agent="product", label="商品检索"),
             AgentStep(agent="recommend", label="智能推荐"),
         ]
-        return reply, products, steps
+        return reply, products, steps, mode
+
+
+def supervisor_from_settings(repository: ProductRepository, settings: Settings) -> ShoppingSupervisor:
+    provider = build_llm_provider(
+        provider=settings.llm_provider,
+        api_key=settings.llm_api_key,
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        api_mode=settings.llm_api_mode,
+        timeout_seconds=settings.llm_timeout_seconds,
+        max_retries=settings.llm_max_retries,
+    )
+    return ShoppingSupervisor(repository, provider)

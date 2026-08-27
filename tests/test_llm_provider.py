@@ -1,0 +1,373 @@
+import asyncio
+
+import httpx
+import pytest
+from pydantic import ValidationError
+
+from smart_commerce.agents.shopping_agents import ShoppingSupervisor
+from smart_commerce.core.config import Settings
+from smart_commerce.models.schemas import Product
+from smart_commerce.repositories.product_repository import ProductRepository
+from smart_commerce.services.llm_provider import (
+    DeepSeekProvider,
+    LLMProviderError,
+    MockLLMProvider,
+    build_llm_provider,
+)
+
+
+class FakeSuccessResponse:
+    def __init__(self, data: object) -> None:
+        self.data = data
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> object:
+        return self.data
+
+
+class CapturingClient:
+    response_data: object = {"choices": [{"message": {"content": "Chat reply"}}]}
+    requests: list[tuple[str, dict[str, object]]] = []
+
+    def __init__(self, **_: object) -> None:
+        pass
+
+    async def __aenter__(self) -> "CapturingClient":
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+    async def post(self, url: str, **kwargs: object) -> FakeSuccessResponse:
+        self.requests.append((url, kwargs["json"]))  # type: ignore[arg-type]
+        return FakeSuccessResponse(self.response_data)
+
+
+def _product() -> Product:
+    return Product(
+        id=1,
+        name="Test Laptop",
+        category="Laptop",
+        brand="Test",
+        price=4999,
+        rating=4.8,
+        review_count=100,
+        tags=["coding"],
+        highlights=["16GB RAM"],
+        description="A test product",
+    )
+
+
+def test_settings_use_chat_as_default_api_mode() -> None:
+    settings = Settings(_env_file=None)
+
+    assert settings.llm_api_mode == "chat"
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("llm_timeout_seconds", 0),
+        ("llm_timeout_seconds", 301),
+        ("llm_max_retries", -1),
+        ("llm_max_retries", 6),
+    ],
+)
+def test_settings_reject_unsafe_retry_configuration(field: str, value: int) -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: value})
+
+
+def test_build_deepseek_provider_uses_default_flash_model() -> None:
+    provider = build_llm_provider(
+        provider="deepseek",
+        api_key="test-key",
+        model=None,
+        base_url="https://api.deepseek.com/v1",
+        timeout_seconds=30,
+        max_retries=2,
+    )
+
+    assert isinstance(provider, DeepSeekProvider)
+    assert provider.model == "deepseekflash"
+    assert provider.api_mode == "chat"
+
+
+def test_build_deepseek_provider_accepts_responses_mode() -> None:
+    provider = build_llm_provider(
+        provider="deepseek",
+        api_key="test-key",
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com/v1",
+        timeout_seconds=30,
+        max_retries=2,
+        api_mode="responses",
+    )
+
+    assert isinstance(provider, DeepSeekProvider)
+    assert provider.api_mode == "responses"
+
+
+def test_deepseek_chat_mode_uses_chat_completions(monkeypatch: pytest.MonkeyPatch) -> None:
+    CapturingClient.requests = []
+    CapturingClient.response_data = {"choices": [{"message": {"content": "Chat reply"}}]}
+    monkeypatch.setattr(httpx, "AsyncClient", CapturingClient)
+
+    provider = DeepSeekProvider(
+        api_key="test-key",
+        base_url="https://example.test/v1",
+        api_mode="chat",
+    )
+    reply = asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
+
+    assert reply == "Chat reply"
+    url, payload = CapturingClient.requests[0]
+    assert url == "https://example.test/v1/chat/completions"
+    assert payload["model"] == "deepseekflash"
+    assert "messages" in payload
+    assert "input" not in payload
+
+
+@pytest.mark.parametrize(
+    "response_data, expected",
+    [
+        ({"output_text": "Responses reply"}, "Responses reply"),
+        (
+            {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "First part"},
+                            {"type": "output_text", "text": "Second part"},
+                        ],
+                    }
+                ]
+            },
+            "First part\nSecond part",
+        ),
+    ],
+)
+def test_deepseek_responses_mode_uses_responses_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    response_data: object,
+    expected: str,
+) -> None:
+    CapturingClient.requests = []
+    CapturingClient.response_data = response_data
+    monkeypatch.setattr(httpx, "AsyncClient", CapturingClient)
+
+    provider = DeepSeekProvider(
+        api_key="test-key",
+        base_url="https://example.test/v1",
+        api_mode="responses",
+    )
+    reply = asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
+
+    assert reply == expected
+    url, payload = CapturingClient.requests[0]
+    assert url == "https://example.test/v1/responses"
+    assert payload["model"] == "deepseekflash"
+    assert "input" in payload
+    assert "messages" not in payload
+
+
+def test_deepseek_responses_empty_output_raises_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    CapturingClient.requests = []
+    CapturingClient.response_data = {"output": []}
+    monkeypatch.setattr(httpx, "AsyncClient", CapturingClient)
+
+    provider = DeepSeekProvider(api_key="test-key", api_mode="responses", max_retries=0)
+
+    with pytest.raises(LLMProviderError, match="empty Responses output"):
+        asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
+
+
+def test_supervisor_falls_back_to_mock_when_provider_fails() -> None:
+    class FailingProvider:
+        name = "deepseek"
+
+        async def generate_reply(self, message: str, products: list[Product]) -> str:
+            raise LLMProviderError("test failure")
+
+    supervisor = ShoppingSupervisor(ProductRepository(), FailingProvider())
+    reply, products, steps, mode = asyncio.run(supervisor.run("推荐一台5000元以内的笔记本"))
+
+    assert products
+    assert reply
+    assert len(steps) == 3
+    assert mode == "mock"
+
+
+def test_mock_provider_keeps_deterministic_reply() -> None:
+    provider = MockLLMProvider()
+    reply = asyncio.run(provider.generate_reply("推荐一台5000元以内的笔记本", [_product()]))
+
+    assert "Test Laptop" in reply
+
+
+def test_supervisor_reports_mock_mode_for_mock_provider() -> None:
+    supervisor = ShoppingSupervisor(ProductRepository(), MockLLMProvider())
+    _, products, steps, mode = asyncio.run(supervisor.run("推荐一台5000元以内的笔记本"))
+
+    assert products
+    assert len(steps) == 3
+    assert mode == "mock"
+
+
+def test_deepseek_does_not_retry_authentication_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    class UnauthorizedResponse:
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "https://example.test/chat/completions")
+            response = httpx.Response(401, request=request)
+            raise httpx.HTTPStatusError("unauthorized", request=request, response=response)
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *_: object, **__: object) -> UnauthorizedResponse:
+            nonlocal calls
+            calls += 1
+            return UnauthorizedResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    provider = DeepSeekProvider(api_key="test-key", max_retries=2)
+
+    with pytest.raises(LLMProviderError):
+        asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
+
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        lambda: httpx.ReadTimeout("timed out"),
+        lambda: httpx.NetworkError("network down"),
+    ],
+    ids=["timeout", "network"],
+)
+def test_deepseek_retries_transient_transport_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    error_factory: object,
+) -> None:
+    calls = 0
+    waits: list[float] = []
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *_: object, **__: object) -> FakeSuccessResponse:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise error_factory()  # type: ignore[operator]
+            return FakeSuccessResponse({"choices": [{"message": {"content": "recovered"}}]})
+
+    async def fake_sleep(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    provider = DeepSeekProvider(api_key="test-key", max_retries=2)
+
+    assert asyncio.run(provider.generate_reply("推荐笔记本", [_product()])) == "recovered"
+    assert calls == 3
+    assert waits == [1, 2]
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+def test_deepseek_retries_rate_limit_and_server_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    calls = 0
+    waits: list[float] = []
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *_: object, **__: object) -> FakeSuccessResponse:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                request = httpx.Request("POST", "https://example.test/chat/completions")
+                response = httpx.Response(status_code, request=request)
+                raise httpx.HTTPStatusError("temporary failure", request=request, response=response)
+            return FakeSuccessResponse({"choices": [{"message": {"content": "recovered"}}]})
+
+    async def fake_sleep(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    provider = DeepSeekProvider(api_key="test-key", max_retries=2)
+
+    assert asyncio.run(provider.generate_reply("推荐笔记本", [_product()])) == "recovered"
+    assert calls == 3
+    assert waits == [1, 2]
+
+
+def test_deepseek_stops_after_configured_retry_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+    waits: list[float] = []
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *_: object, **__: object) -> FakeSuccessResponse:
+            nonlocal calls
+            calls += 1
+            request = httpx.Request("POST", "https://example.test/chat/completions")
+            response = httpx.Response(503, request=request)
+            raise httpx.HTTPStatusError("service unavailable", request=request, response=response)
+
+    async def fake_sleep(delay: float) -> None:
+        waits.append(delay)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    provider = DeepSeekProvider(api_key="test-key", max_retries=1)
+
+    with pytest.raises(LLMProviderError, match="failed after retries"):
+        asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
+
+    assert calls == 2
+    assert waits == [1]

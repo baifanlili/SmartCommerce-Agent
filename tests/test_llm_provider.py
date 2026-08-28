@@ -195,9 +195,9 @@ def test_supervisor_falls_back_to_mock_when_provider_fails() -> None:
             raise LLMProviderError("test failure")
 
     supervisor = ShoppingSupervisor(ProductRepository(), FailingProvider())
-    reply, products, steps, mode = asyncio.run(supervisor.run("推荐一台5000元以内的笔记本"))
+    reply, search_result, steps, mode = asyncio.run(supervisor.run("推荐一台5000元以内的笔记本"))
 
-    assert products
+    assert search_result.products
     assert reply
     assert len(steps) == 3
     assert mode == "mock"
@@ -212,9 +212,9 @@ def test_mock_provider_keeps_deterministic_reply() -> None:
 
 def test_supervisor_reports_mock_mode_for_mock_provider() -> None:
     supervisor = ShoppingSupervisor(ProductRepository(), MockLLMProvider())
-    _, products, steps, mode = asyncio.run(supervisor.run("推荐一台5000元以内的笔记本"))
+    _, search_result, steps, mode = asyncio.run(supervisor.run("推荐一台5000元以内的笔记本"))
 
-    assert products
+    assert search_result.products
     assert len(steps) == 3
     assert mode == "mock"
 

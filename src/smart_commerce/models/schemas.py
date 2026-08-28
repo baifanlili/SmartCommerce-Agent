@@ -22,6 +22,23 @@ class AgentStep(BaseModel):
     status: Literal["completed", "running"] = "completed"
 
 
+class ShoppingFilters(BaseModel):
+    max_price: float | None = Field(default=None, gt=0)
+    category: str | None = Field(default=None, min_length=1, max_length=50)
+    keywords: list[str] = Field(default_factory=list, max_length=8)
+
+
+class ShoppingIntent(BaseModel):
+    name: Literal["product_recommendation"] = "product_recommendation"
+    raw_message: str = Field(min_length=1, max_length=2000)
+    filters: ShoppingFilters
+
+
+class ProductSearchResult(BaseModel):
+    intent: ShoppingIntent
+    products: list[Product]
+
+
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=100)
     message: str = Field(min_length=1, max_length=2000)
@@ -30,6 +47,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     session_id: str
     reply: str
+    intent: ShoppingIntent
     recommendations: list[Product]
     steps: list[AgentStep]
     mode: Literal["mock", "llm"] = "mock"

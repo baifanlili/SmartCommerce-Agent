@@ -37,10 +37,17 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     logger.info("chat_started session_id=%s message_chars=%d", payload.session_id, len(payload.message))
     memory = request.app.state.session_memory
     await memory.append(payload.session_id, "user", payload.message)
-    reply, recommendations, steps, mode = await request.app.state.supervisor.run(payload.message)
+    reply, search_result, steps, mode = await request.app.state.supervisor.run(payload.message)
     await memory.append(payload.session_id, "assistant", reply)
-    response = ChatResponse(session_id=payload.session_id, reply=reply, recommendations=recommendations, steps=steps, mode=mode)
-    logger.info("chat_completed session_id=%s recommendations=%d mode=%s", payload.session_id, len(recommendations), mode)
+    response = ChatResponse(
+        session_id=payload.session_id,
+        reply=reply,
+        intent=search_result.intent,
+        recommendations=search_result.products,
+        steps=steps,
+        mode=mode,
+    )
+    logger.info("chat_completed session_id=%s recommendations=%d mode=%s", payload.session_id, len(search_result.products), mode)
     return response
 
 

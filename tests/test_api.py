@@ -79,6 +79,11 @@ def test_chat_returns_agent_steps_and_recommendations(client) -> None:
     assert response.headers["x-trace-id"]
     payload = response.json()
     assert payload["mode"] == "mock"
+    assert payload["intent"] == {
+        "name": "product_recommendation",
+        "raw_message": "推荐一台5000元以内适合程序员的笔记本",
+        "filters": {"max_price": 5000.0, "category": "Laptop", "keywords": ["程序员"]},
+    }
     assert len(payload["steps"]) == 3
     assert payload["recommendations"][0]["name"] == "ThinkPad T14 Gen 5"
 

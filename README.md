@@ -147,6 +147,29 @@ docker compose up --build
 
 常用错误码包括 `VALIDATION_ERROR`、`BAD_REQUEST`、`NOT_FOUND`、`TOO_MANY_REQUESTS` 和 `INTERNAL_ERROR`，内部异常不会向客户端泄露细节。
 
+### 聊天意图协议
+
+`POST /api/v1/chat` 在保留 `recommendations` 推荐列表的同时，会返回服务端解析出的 `intent`，让接入方可以明确展示或继续处理本次购物条件。当前意图包含原始诉求、预算上限、商品品类和已识别的偏好关键词：
+
+```json
+{
+  "session_id": "demo-session",
+  "reply": "...",
+  "intent": {
+    "name": "product_recommendation",
+    "raw_message": "推荐一台5000元以内适合程序员的笔记本",
+    "filters": {
+      "max_price": 5000,
+      "category": "Laptop",
+      "keywords": ["程序员"]
+    }
+  },
+  "recommendations": []
+}
+```
+
+该字段是向后兼容的响应扩展。当前由规则解析生成，用于稳定业务层协议；真实模型的结构化输出适配将在后续版本实现。
+
 ## 部署路线
 
 本地 Compose 是开发和技术验证入口，不等于最终生产拓扑。后续部署按同一份不可变镜像逐级晋级：`main` 合并后构建一次并使用 Commit SHA 或版本号标记，自动部署 `dev`，测试通过后人工批准进入 `uat`，验收通过后人工批准进入 `prod`。环境差异通过环境变量和 Secret 注入，数据库、Redis、消息队列、向量库和模型密钥不写入镜像。

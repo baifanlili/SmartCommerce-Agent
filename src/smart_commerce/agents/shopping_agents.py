@@ -2,7 +2,7 @@ import re
 import logging
 
 from smart_commerce.core.config import Settings
-from smart_commerce.models.schemas import AgentStep, Product
+from smart_commerce.models.schemas import AgentStep, Product, ProductSearchResult, ShoppingFilters, ShoppingIntent
 from smart_commerce.repositories.product_repository import ProductRepository
 from smart_commerce.services.llm_provider import LLMProvider, LLMProviderError, MockLLMProvider, build_llm_provider
 
@@ -13,16 +13,36 @@ class ProductAgent:
     name = "product"
     label = "商品检索"
 
+    _category_map = {
+        "笔记本": "Laptop",
+        "电脑": "Laptop",
+        "手机": "Phone",
+        "耳机": "Audio",
+        "显示器": "Monitor",
+    }
+    _preference_keywords = ("程序员", "游戏", "办公", "便携", "摄影", "学生")
+
     def __init__(self, repository: ProductRepository) -> None:
         self.repository = repository
 
-    def search(self, message: str) -> list[Product]:
-        max_price = self._extract_budget(message)
-        category = self._extract_category(message)
-        products = self.repository.list_products(max_price=max_price, category=category)
-        if not products and max_price is not None:
-            products = self.repository.list_products(category=category)
-        return products[:3]
+    def understand(self, message: str) -> ShoppingIntent:
+        return ShoppingIntent(
+            raw_message=message,
+            filters=ShoppingFilters(
+                max_price=self._extract_budget(message),
+                category=self._extract_category(message),
+                keywords=[keyword for keyword in self._preference_keywords if keyword in message],
+            ),
+        )
+
+    def search(self, intent: ShoppingIntent) -> ProductSearchResult:
+        products = self.repository.list_products(
+            max_price=intent.filters.max_price,
+            category=intent.filters.category,
+        )
+        if not products and intent.filters.max_price is not None:
+            products = self.repository.list_products(category=intent.filters.category)
+        return ProductSearchResult(intent=intent, products=products[:3])
 
     @staticmethod
     def _extract_budget(message: str) -> float | None:
@@ -35,8 +55,7 @@ class ProductAgent:
 
     @staticmethod
     def _extract_category(message: str) -> str | None:
-        category_map = {"笔记本": "Laptop", "电脑": "Laptop", "手机": "Phone", "耳机": "Audio", "显示器": "Monitor"}
-        for keyword, category in category_map.items():
+        for keyword, category in ProductAgent._category_map.items():
             if keyword in message:
                 return category
         return None
@@ -47,21 +66,22 @@ class ShoppingSupervisor:
         self.product_agent = ProductAgent(repository)
         self.llm_provider = llm_provider or MockLLMProvider()
 
-    async def run(self, message: str) -> tuple[str, list[Product], list[AgentStep], str]:
-        products = self.product_agent.search(message)
+    async def run(self, message: str) -> tuple[str, ProductSearchResult, list[AgentStep], str]:
+        intent = self.product_agent.understand(message)
+        search_result = self.product_agent.search(intent)
         mode = "mock" if self.llm_provider.name == "mock" else "llm"
         try:
-            reply = await self.llm_provider.generate_reply(message, products)
+            reply = await self.llm_provider.generate_reply(message, search_result.products)
         except LLMProviderError:
             logger.warning("llm_reply_failed provider=%s fallback=mock", self.llm_provider.name, exc_info=True)
-            reply = await MockLLMProvider().generate_reply(message, products)
+            reply = await MockLLMProvider().generate_reply(message, search_result.products)
             mode = "mock"
         steps = [
             AgentStep(agent="supervisor", label="需求理解"),
             AgentStep(agent="product", label="商品检索"),
             AgentStep(agent="recommend", label="智能推荐"),
         ]
-        return reply, products, steps, mode
+        return reply, search_result, steps, mode
 
 
 def supervisor_from_settings(repository: ProductRepository, settings: Settings) -> ShoppingSupervisor:

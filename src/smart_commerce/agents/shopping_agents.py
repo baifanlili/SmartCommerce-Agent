@@ -1,9 +1,9 @@
-import re
 import logging
 
 from smart_commerce.core.config import Settings
-from smart_commerce.models.schemas import AgentStep, Product, ProductSearchResult, ShoppingFilters, ShoppingIntent
+from smart_commerce.models.schemas import AgentStep, Product, ProductSearchResult, ShoppingIntent
 from smart_commerce.repositories.product_repository import ProductRepository
+from smart_commerce.services.intent_parser import parse_shopping_intent
 from smart_commerce.services.llm_provider import LLMProvider, LLMProviderError, MockLLMProvider, build_llm_provider
 
 logger = logging.getLogger(__name__)
@@ -13,27 +13,11 @@ class ProductAgent:
     name = "product"
     label = "商品检索"
 
-    _category_map = {
-        "笔记本": "Laptop",
-        "电脑": "Laptop",
-        "手机": "Phone",
-        "耳机": "Audio",
-        "显示器": "Monitor",
-    }
-    _preference_keywords = ("程序员", "游戏", "办公", "便携", "摄影", "学生")
-
     def __init__(self, repository: ProductRepository) -> None:
         self.repository = repository
 
     def understand(self, message: str) -> ShoppingIntent:
-        return ShoppingIntent(
-            raw_message=message,
-            filters=ShoppingFilters(
-                max_price=self._extract_budget(message),
-                category=self._extract_category(message),
-                keywords=[keyword for keyword in self._preference_keywords if keyword in message],
-            ),
-        )
+        return parse_shopping_intent(message)
 
     def search(self, intent: ShoppingIntent) -> ProductSearchResult:
         products = self.repository.list_products(
@@ -44,36 +28,27 @@ class ProductAgent:
             products = self.repository.list_products(category=intent.filters.category)
         return ProductSearchResult(intent=intent, products=products[:3])
 
-    @staticmethod
-    def _extract_budget(message: str) -> float | None:
-        match = re.search(r"(?:低于|不超过|预算|不高于)\s*[¥￥]?\s*(\d+(?:\.\d+)?)", message)
-        if not match:
-            match = re.search(r"[¥￥]?\s*(\d+(?:\.\d+)?)\s*(?:元|块)?\s*(?:以内|以下|封顶)", message)
-        if not match:
-            match = re.search(r"[¥￥]\s*(\d+(?:\.\d+)?)", message)
-        return float(match.group(1)) if match else None
-
-    @staticmethod
-    def _extract_category(message: str) -> str | None:
-        for keyword, category in ProductAgent._category_map.items():
-            if keyword in message:
-                return category
-        return None
-
-
 class ShoppingSupervisor:
     def __init__(self, repository: ProductRepository, llm_provider: LLMProvider | None = None) -> None:
         self.product_agent = ProductAgent(repository)
         self.llm_provider = llm_provider or MockLLMProvider()
 
     async def run(self, message: str) -> tuple[str, ProductSearchResult, list[AgentStep], str]:
-        intent = self.product_agent.understand(message)
-        search_result = self.product_agent.search(intent)
-        mode = "mock" if self.llm_provider.name == "mock" else "llm"
+        active_provider = self.llm_provider
+        mode = "mock" if active_provider.name == "mock" else "llm"
         try:
-            reply = await self.llm_provider.generate_reply(message, search_result.products)
+            intent = await active_provider.extract_intent(message)
         except LLMProviderError:
-            logger.warning("llm_reply_failed provider=%s fallback=mock", self.llm_provider.name, exc_info=True)
+            logger.warning("llm_intent_failed provider=%s fallback=mock", active_provider.name, exc_info=True)
+            active_provider = MockLLMProvider()
+            intent = await active_provider.extract_intent(message)
+            mode = "mock"
+
+        search_result = self.product_agent.search(intent)
+        try:
+            reply = await active_provider.generate_reply(message, search_result.products)
+        except LLMProviderError:
+            logger.warning("llm_reply_failed provider=%s fallback=mock", active_provider.name, exc_info=True)
             reply = await MockLLMProvider().generate_reply(message, search_result.products)
             mode = "mock"
         steps = [

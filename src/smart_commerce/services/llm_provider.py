@@ -7,7 +7,8 @@ from typing import Literal, Protocol
 
 import httpx
 
-from smart_commerce.models.schemas import Product
+from smart_commerce.models.schemas import Product, ShoppingIntent
+from smart_commerce.services.intent_parser import parse_shopping_intent
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,9 @@ class LLMProviderError(RuntimeError):
 
 class LLMProvider(Protocol):
     name: str
+
+    async def extract_intent(self, message: str) -> ShoppingIntent:
+        """Extract a validated shopping intent from the user message."""
 
     async def generate_reply(self, message: str, products: list[Product]) -> str:
         """Generate a shopping explanation for the selected products."""
@@ -56,6 +60,32 @@ def _extract_responses_text(data: object) -> str:
     raise LLMProviderError("DeepSeek returned an empty Responses output")
 
 
+def _extract_chat_text(data: object) -> str:
+    if not isinstance(data, dict):
+        raise LLMProviderError("DeepSeek returned an invalid Chat payload")
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise LLMProviderError("DeepSeek returned an invalid Chat payload") from exc
+
+    if not isinstance(content, str) or not content.strip():
+        raise LLMProviderError("DeepSeek returned an empty Chat response")
+    return content.strip()
+
+
+def _parse_shopping_intent_json(content: str) -> ShoppingIntent:
+    normalized = content.strip()
+    fenced_match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", normalized, flags=re.DOTALL | re.IGNORECASE)
+    if fenced_match:
+        normalized = fenced_match.group(1).strip()
+
+    try:
+        return ShoppingIntent.model_validate(json.loads(normalized))
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise LLMProviderError("DeepSeek returned an invalid shopping intent JSON") from exc
+
+
 def _mock_reply(message: str, products: list[Product]) -> str:
     if not products:
         return "我暂时没有找到完全匹配的商品，可以放宽预算或换一个品类试试。"
@@ -73,6 +103,9 @@ def _mock_reply(message: str, products: list[Product]) -> str:
 class MockLLMProvider:
     name: str = "mock"
 
+    async def extract_intent(self, message: str) -> ShoppingIntent:
+        return parse_shopping_intent(message)
+
     async def generate_reply(self, message: str, products: list[Product]) -> str:
         return _mock_reply(message, products)
 
@@ -87,10 +120,19 @@ class DeepSeekProvider:
     max_retries: int = 2
     name: str = "deepseek"
 
-    async def generate_reply(self, message: str, products: list[Product]) -> str:
-        if not self.api_key:
-            raise LLMProviderError("DeepSeek API key is not configured")
+    async def extract_intent(self, message: str) -> ShoppingIntent:
+        content = await self._generate_text(
+            "你是 SmartCommerce 的购物意图解析器。只返回一个合法 JSON 对象，不要 Markdown、解释或额外字段。"
+            "JSON 必须符合以下结构："
+            '{"name":"product_recommendation","raw_message":"用户原始诉求","filters":'
+            '{"max_price":数字或 null,"category":"Laptop 或 Phone 或 Audio 或 Monitor 或 null",'
+            '"keywords":["偏好关键词"]}}。'
+            "raw_message 必须原样保留用户诉求；未识别的筛选条件使用 null 或空数组。",
+            f"用户诉求：{message}",
+        )
+        return _parse_shopping_intent_json(content)
 
+    async def generate_reply(self, message: str, products: list[Product]) -> str:
         product_context = json.dumps(
             [product.model_dump() for product in products],
             ensure_ascii=False,
@@ -100,7 +142,12 @@ class DeepSeekProvider:
             "只能使用商品数据中存在的事实，不要编造库存、优惠或参数。"
             "用简洁自然的中文说明推荐理由；如果没有结果，请建议用户放宽条件。"
         )
-        user_prompt = f"用户需求：{message}\n候选商品 JSON：{product_context}"
+        return await self._generate_text(system_prompt, f"用户需求：{message}\n候选商品 JSON：{product_context}")
+
+    async def _generate_text(self, system_prompt: str, user_prompt: str) -> str:
+        if not self.api_key:
+            raise LLMProviderError("DeepSeek API key is not configured")
+
         if self.api_mode == "responses":
             payload = {
                 "model": self.model,
@@ -136,10 +183,7 @@ class DeepSeekProvider:
                     data = response.json()
                     if self.api_mode == "responses":
                         return _extract_responses_text(data)
-                    content = data["choices"][0]["message"]["content"]
-                    if not isinstance(content, str) or not content.strip():
-                        raise LLMProviderError("DeepSeek returned an empty Chat response")
-                    return content.strip()
+                    return _extract_chat_text(data)
                 except httpx.HTTPStatusError as exc:
                     last_error = exc
                     retryable = _is_retryable_http_status(exc.response.status_code)

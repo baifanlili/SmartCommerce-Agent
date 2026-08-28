@@ -1,4 +1,5 @@
 import asyncio
+from typing import Literal, cast
 
 import httpx
 import pytest
@@ -6,7 +7,7 @@ from pydantic import ValidationError
 
 from smart_commerce.agents.shopping_agents import ShoppingSupervisor
 from smart_commerce.core.config import Settings
-from smart_commerce.models.schemas import Product
+from smart_commerce.models.schemas import Product, ShoppingIntent
 from smart_commerce.repositories.product_repository import ProductRepository
 from smart_commerce.services.llm_provider import (
     DeepSeekProvider,
@@ -57,6 +58,14 @@ def _product() -> Product:
         tags=["coding"],
         highlights=["16GB RAM"],
         description="A test product",
+    )
+
+
+def _intent_json(message: str = "推荐一台5000元以内适合程序员的笔记本") -> str:
+    return (
+        '{"name":"product_recommendation","raw_message":"'
+        f'{message}'
+        '","filters":{"max_price":5000,"category":"Laptop","keywords":["程序员"]}}'
     )
 
 
@@ -187,9 +196,87 @@ def test_deepseek_responses_empty_output_raises_provider_error(
         asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
 
 
+@pytest.mark.parametrize(
+    "api_mode, response_data",
+    [
+        ("chat", {"choices": [{"message": {"content": f"```json\n{_intent_json()}\n```"}}]}),
+        ("responses", {"output_text": _intent_json()}),
+    ],
+)
+def test_deepseek_extract_intent_parses_chat_and_responses_json(
+    monkeypatch: pytest.MonkeyPatch,
+    api_mode: str,
+    response_data: object,
+) -> None:
+    CapturingClient.requests = []
+    CapturingClient.response_data = response_data
+    monkeypatch.setattr(httpx, "AsyncClient", CapturingClient)
+    provider = DeepSeekProvider(api_key="test-key", api_mode=cast(Literal["chat", "responses"], api_mode))
+
+    intent = asyncio.run(provider.extract_intent("推荐一台5000元以内适合程序员的笔记本"))
+
+    assert isinstance(intent, ShoppingIntent)
+    assert intent.filters.max_price == 5000
+    assert intent.filters.category == "Laptop"
+    assert intent.filters.keywords == ["程序员"]
+    _, payload = CapturingClient.requests[0]
+    assert "购物意图解析器" in str(payload)
+
+
+@pytest.mark.parametrize(
+    "api_mode, response_data",
+    [
+        ("chat", {"choices": [{"message": {"content": ""}}]}),
+        ("responses", {"output": []}),
+    ],
+)
+def test_deepseek_extract_intent_rejects_empty_output(
+    monkeypatch: pytest.MonkeyPatch,
+    api_mode: str,
+    response_data: object,
+) -> None:
+    CapturingClient.response_data = response_data
+    monkeypatch.setattr(httpx, "AsyncClient", CapturingClient)
+    provider = DeepSeekProvider(
+        api_key="test-key",
+        api_mode=cast(Literal["chat", "responses"], api_mode),
+        max_retries=0,
+    )
+
+    with pytest.raises(LLMProviderError):
+        asyncio.run(provider.extract_intent("推荐笔记本"))
+
+
+@pytest.mark.parametrize(
+    "api_mode, response_data",
+    [
+        ("chat", {"choices": [{"message": {"content": "not-json"}}]}),
+        ("responses", {"output_text": '{"filters": {}}'}),
+    ],
+)
+def test_deepseek_extract_intent_rejects_invalid_json_or_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    api_mode: str,
+    response_data: object,
+) -> None:
+    CapturingClient.response_data = response_data
+    monkeypatch.setattr(httpx, "AsyncClient", CapturingClient)
+    provider = DeepSeekProvider(
+        api_key="test-key",
+        api_mode=cast(Literal["chat", "responses"], api_mode),
+        max_retries=0,
+    )
+
+    with pytest.raises(LLMProviderError, match="invalid shopping intent JSON"):
+        asyncio.run(provider.extract_intent("推荐笔记本"))
+
+
 def test_supervisor_falls_back_to_mock_when_provider_fails() -> None:
     class FailingProvider:
         name = "deepseek"
+
+        async def extract_intent(self, message: str) -> ShoppingIntent:
+            raise LLMProviderError("test failure")
 
         async def generate_reply(self, message: str, products: list[Product]) -> str:
             raise LLMProviderError("test failure")
@@ -203,11 +290,59 @@ def test_supervisor_falls_back_to_mock_when_provider_fails() -> None:
     assert mode == "mock"
 
 
+def test_supervisor_does_not_use_llm_reply_after_intent_fallback() -> None:
+    class InvalidIntentProvider:
+        name = "deepseek"
+
+        async def extract_intent(self, message: str) -> ShoppingIntent:
+            raise LLMProviderError("invalid intent")
+
+        async def generate_reply(self, message: str, products: list[Product]) -> str:
+            raise AssertionError("reply generation should use Mock after intent fallback")
+
+    supervisor = ShoppingSupervisor(ProductRepository(), InvalidIntentProvider())
+    reply, search_result, _, mode = asyncio.run(supervisor.run("推荐一台5000元以内的笔记本"))
+
+    assert reply
+    assert search_result.products
+    assert mode == "mock"
+
+
+def test_supervisor_uses_the_provider_structured_intent_for_search() -> None:
+    class StructuredProvider:
+        name = "deepseek"
+
+        async def extract_intent(self, message: str) -> ShoppingIntent:
+            return ShoppingIntent(
+                raw_message=message,
+                filters={"max_price": 5000, "category": "Laptop", "keywords": ["模型解析"]},
+            )
+
+        async def generate_reply(self, message: str, products: list[Product]) -> str:
+            return "模型推荐结果"
+
+    supervisor = ShoppingSupervisor(ProductRepository(), StructuredProvider())
+    reply, search_result, _, mode = asyncio.run(supervisor.run("随便推荐一台电脑"))
+
+    assert reply == "模型推荐结果"
+    assert search_result.intent.filters.keywords == ["模型解析"]
+    assert search_result.products
+    assert mode == "llm"
+
+
 def test_mock_provider_keeps_deterministic_reply() -> None:
     provider = MockLLMProvider()
     reply = asyncio.run(provider.generate_reply("推荐一台5000元以内的笔记本", [_product()]))
 
     assert "Test Laptop" in reply
+
+
+def test_mock_provider_returns_the_deterministic_shopping_intent() -> None:
+    provider = MockLLMProvider()
+
+    intent = asyncio.run(provider.extract_intent("推荐一台5000元以内适合程序员的笔记本"))
+
+    assert intent == ShoppingIntent.model_validate_json(_intent_json())
 
 
 def test_supervisor_reports_mock_mode_for_mock_provider() -> None:

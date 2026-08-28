@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
@@ -29,6 +30,62 @@ class LLMProvider(Protocol):
 
 def _is_retryable_http_status(status_code: int) -> bool:
     return status_code == 429 or status_code >= 500
+
+
+def _extract_usage(data: object) -> tuple[int | None, int | None, int | None]:
+    if not isinstance(data, dict):
+        return None, None, None
+
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None, None, None
+
+    def read_count(*keys: str) -> int | None:
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, int) and value >= 0:
+                return value
+        return None
+
+    return (
+        read_count("prompt_tokens", "input_tokens"),
+        read_count("completion_tokens", "output_tokens"),
+        read_count("total_tokens"),
+    )
+
+
+def _log_llm_call(
+    *,
+    outcome: Literal["completed", "failed"],
+    provider: str,
+    model: str,
+    api_mode: str,
+    duration_ms: float,
+    attempts: int,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    total_tokens: int | None = None,
+    error_type: str | None = None,
+) -> None:
+    message = (
+        f"llm_call_{outcome} provider=%s model=%s api_mode=%s duration_ms=%.1f "
+        "attempts=%d retries=%d prompt_tokens=%s completion_tokens=%s total_tokens=%s"
+    )
+    values: tuple[object, ...] = (
+        provider,
+        model,
+        api_mode,
+        duration_ms,
+        attempts,
+        max(attempts - 1, 0),
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    )
+    if outcome == "failed":
+        logger.warning(f"{message} error_type=%s", *values, error_type or "UnknownError")
+        return
+    logger.info(message, *values)
 
 
 def _extract_responses_text(data: object) -> str:
@@ -104,10 +161,30 @@ class MockLLMProvider:
     name: str = "mock"
 
     async def extract_intent(self, message: str) -> ShoppingIntent:
-        return parse_shopping_intent(message)
+        started = time.perf_counter()
+        intent = parse_shopping_intent(message)
+        _log_llm_call(
+            outcome="completed",
+            provider=self.name,
+            model="rule_based",
+            api_mode="local",
+            duration_ms=(time.perf_counter() - started) * 1000,
+            attempts=1,
+        )
+        return intent
 
     async def generate_reply(self, message: str, products: list[Product]) -> str:
-        return _mock_reply(message, products)
+        started = time.perf_counter()
+        reply = _mock_reply(message, products)
+        _log_llm_call(
+            outcome="completed",
+            provider=self.name,
+            model="rule_based",
+            api_mode="local",
+            duration_ms=(time.perf_counter() - started) * 1000,
+            attempts=1,
+        )
+        return reply
 
 
 @dataclass(frozen=True)
@@ -145,7 +222,18 @@ class DeepSeekProvider:
         return await self._generate_text(system_prompt, f"用户需求：{message}\n候选商品 JSON：{product_context}")
 
     async def _generate_text(self, system_prompt: str, user_prompt: str) -> str:
+        started = time.perf_counter()
+        attempts = 0
         if not self.api_key:
+            _log_llm_call(
+                outcome="failed",
+                provider=self.name,
+                model=self.model,
+                api_mode=self.api_mode,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                attempts=attempts,
+                error_type="LLMProviderError",
+            )
             raise LLMProviderError("DeepSeek API key is not configured")
 
         if self.api_mode == "responses":
@@ -178,12 +266,27 @@ class DeepSeekProvider:
             for attempt in range(self.max_retries + 1):
                 retryable = False
                 try:
+                    attempts = attempt + 1
                     response = await client.post(url, headers=headers, json=payload)
                     response.raise_for_status()
                     data = response.json()
+                    prompt_tokens, completion_tokens, total_tokens = _extract_usage(data)
                     if self.api_mode == "responses":
-                        return _extract_responses_text(data)
-                    return _extract_chat_text(data)
+                        text = _extract_responses_text(data)
+                    else:
+                        text = _extract_chat_text(data)
+                    _log_llm_call(
+                        outcome="completed",
+                        provider=self.name,
+                        model=self.model,
+                        api_mode=self.api_mode,
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        attempts=attempts,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=total_tokens,
+                    )
+                    return text
                 except httpx.HTTPStatusError as exc:
                     last_error = exc
                     retryable = _is_retryable_http_status(exc.response.status_code)
@@ -197,6 +300,15 @@ class DeepSeekProvider:
                     break
                 await asyncio.sleep(min(2**attempt, 4))
 
+        _log_llm_call(
+            outcome="failed",
+            provider=self.name,
+            model=self.model,
+            api_mode=self.api_mode,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            attempts=attempts,
+            error_type=type(last_error).__name__ if last_error else "LLMProviderError",
+        )
         raise LLMProviderError(f"DeepSeek request failed after retries: {last_error}") from last_error
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import Literal, cast
 
 import httpx
@@ -506,3 +507,83 @@ def test_deepseek_stops_after_configured_retry_limit(monkeypatch: pytest.MonkeyP
 
     assert calls == 2
     assert waits == [1]
+
+
+def test_llm_call_log_records_usage_without_sensitive_request_data(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    CapturingClient.requests = []
+    CapturingClient.response_data = {
+        "choices": [{"message": {"content": "Chat reply"}}],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    }
+    monkeypatch.setattr(httpx, "AsyncClient", CapturingClient)
+    provider = DeepSeekProvider(api_key="secret-api-key", model="deepseek-test")
+
+    with caplog.at_level(logging.INFO):
+        assert asyncio.run(provider.generate_reply("private shopping request", [_product()])) == "Chat reply"
+
+    message = next(record.getMessage() for record in caplog.records if record.getMessage().startswith("llm_call_completed"))
+    assert "provider=deepseek" in message
+    assert "model=deepseek-test" in message
+    assert "api_mode=chat" in message
+    assert "attempts=1 retries=0" in message
+    assert "prompt_tokens=11 completion_tokens=7 total_tokens=18" in message
+    assert "secret-api-key" not in message
+    assert "private shopping request" not in message
+
+
+def test_llm_call_failure_log_records_retry_count(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    class FailingResponse:
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "https://example.test/chat/completions")
+            response = httpx.Response(503, request=request)
+            raise httpx.HTTPStatusError("service unavailable", request=request, response=response)
+
+    class FailingClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "FailingClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *_: object, **__: object) -> FailingResponse:
+            return FailingResponse()
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(httpx, "AsyncClient", FailingClient)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    provider = DeepSeekProvider(api_key="test-key", max_retries=1)
+
+    with caplog.at_level(logging.WARNING), pytest.raises(LLMProviderError, match="failed after retries"):
+        asyncio.run(provider.generate_reply("private shopping request", [_product()]))
+
+    message = next(record.getMessage() for record in caplog.records if record.getMessage().startswith("llm_call_failed"))
+    assert "provider=deepseek" in message
+    assert "attempts=2 retries=1" in message
+    assert "error_type=HTTPStatusError" in message
+    assert "private shopping request" not in message
+
+
+def test_supervisor_fallback_log_does_not_include_user_message(caplog: pytest.LogCaptureFixture) -> None:
+    class FailingProvider:
+        name = "deepseek"
+
+        async def extract_intent(self, message: str) -> ShoppingIntent:
+            raise LLMProviderError("provider failure")
+
+        async def generate_reply(self, message: str, products: list[Product]) -> str:
+            raise LLMProviderError("provider failure")
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(ShoppingSupervisor(ProductRepository(), FailingProvider()).run("private shopping request"))
+
+    message = next(record.getMessage() for record in caplog.records if record.getMessage().startswith("llm_fallback"))
+    assert "provider=deepseek fallback=mock operation=intent" in message
+    assert "private shopping request" not in message

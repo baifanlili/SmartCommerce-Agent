@@ -38,8 +38,12 @@ class ShoppingSupervisor:
         mode = "mock" if active_provider.name == "mock" else "llm"
         try:
             intent = await active_provider.extract_intent(message)
-        except LLMProviderError:
-            logger.warning("llm_intent_failed provider=%s fallback=mock", active_provider.name, exc_info=True)
+        except LLMProviderError as exc:
+            logger.warning(
+                "llm_fallback provider=%s fallback=mock operation=intent reason=provider_error error_type=%s",
+                active_provider.name,
+                type(exc).__name__,
+            )
             active_provider = MockLLMProvider()
             intent = await active_provider.extract_intent(message)
             mode = "mock"
@@ -47,8 +51,12 @@ class ShoppingSupervisor:
         search_result = self.product_agent.search(intent)
         try:
             reply = await active_provider.generate_reply(message, search_result.products)
-        except LLMProviderError:
-            logger.warning("llm_reply_failed provider=%s fallback=mock", active_provider.name, exc_info=True)
+        except LLMProviderError as exc:
+            logger.warning(
+                "llm_fallback provider=%s fallback=mock operation=reply reason=provider_error error_type=%s",
+                active_provider.name,
+                type(exc).__name__,
+            )
             reply = await MockLLMProvider().generate_reply(message, search_result.products)
             mode = "mock"
         steps = [

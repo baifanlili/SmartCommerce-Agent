@@ -29,7 +29,7 @@ def _request_ids(request: Request) -> tuple[str, str]:
     return request_id, trace_id
 
 
-def _error_response(
+def error_response(
     request: Request,
     status_code: int,
     code: str,
@@ -52,7 +52,7 @@ def _error_response(
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
-        return _error_response(request, exc.status_code, exc.code, exc.message, exc.details)
+        return error_response(request, exc.status_code, exc.code, exc.message, exc.details)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -60,7 +60,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         for error in exc.errors():
             field_parts = [str(part) for part in error.get("loc", []) if part != "body"]
             details.append({"field": ".".join(field_parts) or "body", "message": error.get("msg", "invalid value")})
-        return _error_response(request, 422, "VALIDATION_ERROR", "请求参数校验失败", details)
+        return error_response(request, 422, "VALIDATION_ERROR", "请求参数校验失败", details)
 
     @app.exception_handler(StarletteHTTPException)
     async def handle_http_error(request: Request, exc: StarletteHTTPException) -> JSONResponse:
@@ -74,9 +74,9 @@ def register_exception_handlers(app: FastAPI) -> None:
             429: "TOO_MANY_REQUESTS",
         }
         message = exc.detail if isinstance(exc.detail, str) else "请求处理失败"
-        return _error_response(request, exc.status_code, code_map.get(exc.status_code, "HTTP_ERROR"), message, [])
+        return error_response(request, exc.status_code, code_map.get(exc.status_code, "HTTP_ERROR"), message, [])
 
     @app.exception_handler(Exception)
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled_exception path=%s", request.url.path)
-        return _error_response(request, 500, "INTERNAL_ERROR", "服务器内部错误", [])
+        return error_response(request, 500, "INTERNAL_ERROR", "服务器内部错误", [])

@@ -3,16 +3,24 @@ import pytest
 
 from smart_commerce.main import app
 from smart_commerce.agents.shopping_agents import ShoppingSupervisor
+from smart_commerce.core.identity import IdentityContext
 from smart_commerce.services.llm_provider import MockLLMProvider
+from smart_commerce.services.session_memory import SessionMemory
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def client():
     app.state.settings.admin_token = "test-admin-token"
+    app.state.settings.environment = "development"
+    app.state.settings.identity_mode = "development"
+    app.state.settings.identity_gateway_token = None
     app.state.supervisor = ShoppingSupervisor(app.state.product_repository, MockLLMProvider())
     with TestClient(app) as test_client:
         yield test_client
     app.state.settings.admin_token = None
+    app.state.settings.environment = "development"
+    app.state.settings.identity_mode = "development"
+    app.state.settings.identity_gateway_token = None
 
 
 def test_liveness_does_not_require_redis(client) -> None:
@@ -86,6 +94,100 @@ def test_chat_returns_agent_steps_and_recommendations(client) -> None:
     }
     assert len(payload["steps"]) == 3
     assert payload["recommendations"][0]["name"] == "ThinkPad T14 Gen 5"
+
+
+def test_development_chat_uses_anonymous_identity_without_headers(client) -> None:
+    response = client.post("/api/v1/chat", json={"session_id": "anonymous-session", "message": "推荐笔记本"})
+
+    assert response.status_code == 200
+
+
+def test_chat_rejects_identity_fields_in_request_body(client) -> None:
+    response = client.post(
+        "/api/v1/chat",
+        json={
+            "session_id": "test-session",
+            "message": "推荐笔记本",
+            "user_id": "forged-user",
+            "tenant_id": "forged-tenant",
+            "role": "admin",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_gateway_identity_requires_server_configuration(client) -> None:
+    app.state.settings.environment = "production"
+    app.state.settings.identity_gateway_token = None
+
+    response = client.post("/api/v1/chat", json={"session_id": "production-session", "message": "推荐笔记本"})
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "IDENTITY_AUTH_NOT_CONFIGURED"
+
+
+def test_gateway_identity_rejects_invalid_token(client) -> None:
+    app.state.settings.environment = "production"
+    app.state.settings.identity_gateway_token = "trusted-gateway-token"
+
+    response = client.post(
+        "/api/v1/chat",
+        headers={"X-Agent-Identity-Token": "wrong-token"},
+        json={"session_id": "production-session", "message": "推荐笔记本"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "IDENTITY_TOKEN_INVALID"
+
+
+def test_gateway_identity_requires_verified_context_headers(client) -> None:
+    app.state.settings.environment = "production"
+    app.state.settings.identity_gateway_token = "trusted-gateway-token"
+
+    response = client.post(
+        "/api/v1/chat",
+        headers={"X-Agent-Identity-Token": "trusted-gateway-token"},
+        json={"session_id": "production-session", "message": "推荐笔记本"},
+    )
+
+    assert response.status_code == 401
+    error = response.json()["error"]
+    assert error["code"] == "IDENTITY_CONTEXT_INVALID"
+    assert error["details"] == [{"field": "user_id", "message": "必须是 1-128 位的字母、数字、点、下划线或连字符"}]
+
+
+def test_gateway_identity_accepts_trusted_headers_and_preserves_trace_id(client) -> None:
+    app.state.settings.environment = "production"
+    app.state.settings.identity_gateway_token = "trusted-gateway-token"
+
+    response = client.post(
+        "/api/v1/chat",
+        headers={
+            "X-Agent-Identity-Token": "trusted-gateway-token",
+            "X-Agent-User-ID": "user-10001",
+            "X-Agent-Tenant-ID": "tenant-demo",
+            "X-Agent-Role": "user",
+            "X-Agent-Scopes": "agent:chat,memory:read:self",
+            "X-Trace-ID": "trace-from-gateway",
+        },
+        json={"session_id": "production-session", "message": "推荐笔记本"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-trace-id"] == "trace-from-gateway"
+
+
+def test_session_storage_key_isolated_by_tenant_and_user() -> None:
+    session_id = "same-session"
+    first = IdentityContext(user_id="user-a", tenant_id="tenant-a", role="user", trace_id="trace-a")
+    second = IdentityContext(user_id="user-b", tenant_id="tenant-a", role="user", trace_id="trace-b")
+    third = IdentityContext(user_id="user-a", tenant_id="tenant-b", role="user", trace_id="trace-c")
+
+    assert SessionMemory.storage_key(first, session_id) == "smart-commerce:session:tenant-a:user-a:same-session"
+    assert SessionMemory.storage_key(first, session_id) != SessionMemory.storage_key(second, session_id)
+    assert SessionMemory.storage_key(first, session_id) != SessionMemory.storage_key(third, session_id)
 
 
 def test_admin_config_requires_token(client) -> None:

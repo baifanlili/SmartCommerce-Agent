@@ -8,6 +8,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "SmartCommerce-Agent"
     environment: str = "development"
+    identity_mode: Literal["development", "gateway"] = "development"
+    identity_gateway_token: str | None = None
     redis_url: str = "redis://localhost:6379/0"
     llm_provider: str = "mock"
     llm_api_key: str | None = None

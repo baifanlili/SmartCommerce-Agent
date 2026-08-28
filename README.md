@@ -147,6 +147,22 @@ docker compose up --build
 
 常用错误码包括 `VALIDATION_ERROR`、`BAD_REQUEST`、`NOT_FOUND`、`TOO_MANY_REQUESTS` 和 `INTERNAL_ERROR`，内部异常不会向客户端泄露细节。
 
+### 身份上下文与会话隔离
+
+`POST /api/v1/chat` 的请求体只接收 `session_id` 和 `message`。`user_id`、`tenant_id`、`role` 等身份字段不允许由客户端请求体传入，避免客户端伪造身份；服务端使用已验证的身份上下文将会话按 `tenant_id + user_id + session_id` 隔离保存。
+
+本地 Compose 默认使用匿名开发身份，因此无需登录服务即可运行 Mock 回归。部署到非 `development` 环境时，API 会要求受信网关注入下面的请求头；若未配置 `IDENTITY_GATEWAY_TOKEN`，聊天接口会返回 `503`，不会降级为匿名访问：
+
+```text
+X-Agent-Identity-Token: <与 IDENTITY_GATEWAY_TOKEN 一致的网关令牌>
+X-Agent-User-ID: user-10001
+X-Agent-Tenant-ID: tenant-demo
+X-Agent-Role: user | admin | observer
+X-Agent-Scopes: agent:chat,memory:read:self
+```
+
+该阶段只定义 Python Agent 消费的可信上下文边界，不在 Python 服务内重复实现用户密码、登录或令牌签发。生产环境应由 Java 身份服务或 API Gateway 验证原始登录令牌后，再通过受保护的内部网络注入这些头；`IDENTITY_GATEWAY_TOKEN` 应由 Secret Manager 管理，不能提交到仓库。
+
 ### 聊天意图协议
 
 `POST /api/v1/chat` 在保留 `recommendations` 推荐列表的同时，会返回服务端解析出的 `intent`，让接入方可以明确展示或继续处理本次购物条件。当前意图包含原始诉求、预算上限、商品品类和已识别的偏好关键词：
@@ -224,6 +240,8 @@ Copy-Item .env.example .env
 ```
 
 默认 `.env.example` 使用不需要密钥的 Mock 模式。本机接入 DeepSeek 时，配置 `LLM_PROVIDER=deepseek`、`LLM_API_KEY` 和 `LLM_MODEL=deepseekflash`。协议默认使用 Chat Completions；DeepSeek 的 Responses API 可以通过 `LLM_API_MODE=responses` 选择。API 请求失败会按配置重试，仍失败时自动回退到 Mock，避免购物演示整体不可用。密钥只放在本机 `.env`，不要提交到 Git。
+
+身份验证模式使用 `ENVIRONMENT`、`IDENTITY_MODE` 和 `IDENTITY_GATEWAY_TOKEN` 配置。默认的 `ENVIRONMENT=development` 与 `IDENTITY_MODE=development` 仅适合本地匿名开发；任何非 `development` 环境都会强制要求网关令牌和完整身份头。
 
 模型配置既可以通过环境变量注入，也可以在管理员配置台中运行期调整。配置台支持 Mock/DeepSeek、Chat Completions/Responses、模型名称、Base URL、超时、重试次数、连接测试、保存草稿和启用配置；API Key 只接收和使用，读取时仅返回脱敏结果。管理员接口需要 `X-Admin-Token`，由 `ADMIN_TOKEN` 注入。当前配置草稿和启用状态仅保存在单个 API 进程内，尚未接入加密持久化、管理员账号体系、审计日志和多副本同步，因此只适合作为 v0.2 的开发验证能力。
 

@@ -34,11 +34,12 @@ def products(request: Request, max_price: float | None = Query(default=None, gt=
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
-    logger.info("chat_started session_id=%s message_chars=%d", payload.session_id, len(payload.message))
+    identity = request.state.identity
+    logger.info("chat_started session_id=%s user_id=%s tenant_id=%s message_chars=%d", payload.session_id, identity.user_id, identity.tenant_id, len(payload.message))
     memory = request.app.state.session_memory
-    await memory.append(payload.session_id, "user", payload.message)
+    await memory.append(identity, payload.session_id, "user", payload.message)
     reply, search_result, steps, mode = await request.app.state.supervisor.run(payload.message)
-    await memory.append(payload.session_id, "assistant", reply)
+    await memory.append(identity, payload.session_id, "assistant", reply)
     response = ChatResponse(
         session_id=payload.session_id,
         reply=reply,
@@ -47,7 +48,7 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
         steps=steps,
         mode=mode,
     )
-    logger.info("chat_completed session_id=%s recommendations=%d mode=%s", payload.session_id, len(search_result.products), mode)
+    logger.info("chat_completed session_id=%s user_id=%s tenant_id=%s recommendations=%d mode=%s", payload.session_id, identity.user_id, identity.tenant_id, len(search_result.products), mode)
     return response
 
 

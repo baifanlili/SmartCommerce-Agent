@@ -4,6 +4,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      IDENTITY_MODE: ${IDENTITY_MODE:-development}
+      IDENTITY_GATEWAY_TOKEN: ${IDENTITY_GATEWAY_TOKEN:-}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -31,6 +34,9 @@ services:
       context: .
       dockerfile: backend/Dockerfile.test
     environment:
+      ENVIRONMENT: development
+      IDENTITY_MODE: development
+      IDENTITY_GATEWAY_TOKEN: ""
       REDIS_URL: redis://redis:6379/0
       LLM_PROVIDER: mock
       LLM_API_KEY: ""

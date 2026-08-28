@@ -13,6 +13,7 @@ from smart_commerce.repositories.product_repository import ProductRepository
 from smart_commerce.services.llm_provider import (
     DeepSeekProvider,
     LLMProviderError,
+    LLMProviderErrorCode,
     MockLLMProvider,
     build_llm_provider,
 )
@@ -67,6 +68,20 @@ def _intent_json(message: str = "推荐一台5000元以内适合程序员的笔�
         '{"name":"product_recommendation","raw_message":"'
         f'{message}'
         '","filters":{"max_price":5000,"category":"Laptop","keywords":["程序员"]}}'
+    )
+
+
+def _provider_error(
+    code: LLMProviderErrorCode = "LLM_UPSTREAM_ERROR",
+    *,
+    retryable: bool = False,
+) -> LLMProviderError:
+    return LLMProviderError(
+        code,
+        "test provider failure",
+        status_code=502,
+        public_message="模型服务暂时不可用",
+        retryable=retryable,
     )
 
 
@@ -193,8 +208,12 @@ def test_deepseek_responses_empty_output_raises_provider_error(
 
     provider = DeepSeekProvider(api_key="test-key", api_mode="responses", max_retries=0)
 
-    with pytest.raises(LLMProviderError, match="empty Responses output"):
+    with pytest.raises(LLMProviderError, match="empty Responses output") as exc_info:
         asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
+
+    assert exc_info.value.code == "LLM_RESPONSE_INVALID"
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.retryable is False
 
 
 @pytest.mark.parametrize(
@@ -244,8 +263,11 @@ def test_deepseek_extract_intent_rejects_empty_output(
         max_retries=0,
     )
 
-    with pytest.raises(LLMProviderError):
+    with pytest.raises(LLMProviderError) as exc_info:
         asyncio.run(provider.extract_intent("推荐笔记本"))
+
+    assert exc_info.value.code == "LLM_RESPONSE_INVALID"
+    assert exc_info.value.retryable is False
 
 
 @pytest.mark.parametrize(
@@ -268,8 +290,11 @@ def test_deepseek_extract_intent_rejects_invalid_json_or_schema(
         max_retries=0,
     )
 
-    with pytest.raises(LLMProviderError, match="invalid shopping intent JSON"):
+    with pytest.raises(LLMProviderError, match="invalid shopping intent JSON") as exc_info:
         asyncio.run(provider.extract_intent("推荐笔记本"))
+
+    assert exc_info.value.code == "LLM_RESPONSE_INVALID"
+    assert exc_info.value.retryable is False
 
 
 def test_supervisor_falls_back_to_mock_when_provider_fails() -> None:
@@ -277,10 +302,10 @@ def test_supervisor_falls_back_to_mock_when_provider_fails() -> None:
         name = "deepseek"
 
         async def extract_intent(self, message: str) -> ShoppingIntent:
-            raise LLMProviderError("test failure")
+            raise _provider_error()
 
         async def generate_reply(self, message: str, products: list[Product]) -> str:
-            raise LLMProviderError("test failure")
+            raise _provider_error()
 
     supervisor = ShoppingSupervisor(ProductRepository(), FailingProvider())
     reply, search_result, steps, mode = asyncio.run(supervisor.run("推荐一台5000元以内的笔记本"))
@@ -296,7 +321,7 @@ def test_supervisor_does_not_use_llm_reply_after_intent_fallback() -> None:
         name = "deepseek"
 
         async def extract_intent(self, message: str) -> ShoppingIntent:
-            raise LLMProviderError("invalid intent")
+            raise _provider_error("LLM_RESPONSE_INVALID")
 
         async def generate_reply(self, message: str, products: list[Product]) -> str:
             raise AssertionError("reply generation should use Mock after intent fallback")
@@ -382,10 +407,68 @@ def test_deepseek_does_not_retry_authentication_errors(monkeypatch: pytest.Monke
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
     provider = DeepSeekProvider(api_key="test-key", max_retries=2)
 
-    with pytest.raises(LLMProviderError):
+    with pytest.raises(LLMProviderError) as exc_info:
         asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
 
     assert calls == 1
+    assert exc_info.value.code == "LLM_AUTH_ERROR"
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_code", "expected_status", "retryable"),
+    [
+        (400, "LLM_REQUEST_ERROR", 502, False),
+        (403, "LLM_AUTH_ERROR", 502, False),
+        (429, "LLM_RATE_LIMITED", 503, True),
+        (500, "LLM_UPSTREAM_ERROR", 502, True),
+    ],
+)
+def test_deepseek_http_errors_have_stable_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    expected_code: LLMProviderErrorCode,
+    expected_status: int,
+    retryable: bool,
+) -> None:
+    calls = 0
+
+    class FailingResponse:
+        def raise_for_status(self) -> None:
+            request = httpx.Request("POST", "https://example.test/chat/completions")
+            response = httpx.Response(status_code, request=request)
+            raise httpx.HTTPStatusError("provider failure", request=request, response=response)
+
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *_: object, **__: object) -> FailingResponse:
+            nonlocal calls
+            calls += 1
+            return FailingResponse()
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    provider = DeepSeekProvider(api_key="test-key", max_retries=1)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
+
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.status_code == expected_status
+    assert exc_info.value.retryable is retryable
+    assert calls == (2 if retryable else 1)
 
 
 @pytest.mark.parametrize(
@@ -502,11 +585,67 @@ def test_deepseek_stops_after_configured_retry_limit(monkeypatch: pytest.MonkeyP
 
     provider = DeepSeekProvider(api_key="test-key", max_retries=1)
 
-    with pytest.raises(LLMProviderError, match="failed after retries"):
+    with pytest.raises(LLMProviderError) as exc_info:
         asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
 
     assert calls == 2
     assert waits == [1]
+    assert exc_info.value.code == "LLM_UPSTREAM_ERROR"
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    "error_factory, expected_code, expected_status",
+    [
+        (lambda: httpx.ReadTimeout("timed out"), "LLM_TIMEOUT", 504),
+        (lambda: httpx.NetworkError("network down"), "LLM_NETWORK_ERROR", 503),
+    ],
+    ids=["timeout", "network"],
+)
+def test_deepseek_transport_errors_have_stable_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    error_factory: object,
+    expected_code: LLMProviderErrorCode,
+    expected_status: int,
+) -> None:
+    class FakeClient:
+        def __init__(self, **_: object) -> None:
+            pass
+
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *_: object, **__: object) -> FakeSuccessResponse:
+            raise error_factory()  # type: ignore[operator]
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    provider = DeepSeekProvider(api_key="test-key", max_retries=0)
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
+
+    assert exc_info.value.code == expected_code
+    assert exc_info.value.status_code == expected_status
+    assert exc_info.value.retryable is True
+
+
+def test_deepseek_without_api_key_has_stable_config_error() -> None:
+    provider = DeepSeekProvider(api_key="")
+
+    with pytest.raises(LLMProviderError) as exc_info:
+        asyncio.run(provider.generate_reply("推荐笔记本", [_product()]))
+
+    assert exc_info.value.code == "LLM_CONFIG_ERROR"
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.public_message == "模型服务配置不完整"
+    assert exc_info.value.retryable is False
 
 
 def test_llm_call_log_records_usage_without_sensitive_request_data(
@@ -561,13 +700,13 @@ def test_llm_call_failure_log_records_retry_count(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     provider = DeepSeekProvider(api_key="test-key", max_retries=1)
 
-    with caplog.at_level(logging.WARNING), pytest.raises(LLMProviderError, match="failed after retries"):
+    with caplog.at_level(logging.WARNING), pytest.raises(LLMProviderError):
         asyncio.run(provider.generate_reply("private shopping request", [_product()]))
 
     message = next(record.getMessage() for record in caplog.records if record.getMessage().startswith("llm_call_failed"))
     assert "provider=deepseek" in message
     assert "attempts=2 retries=1" in message
-    assert "error_type=HTTPStatusError" in message
+    assert "error_type=HTTPStatusError error_code=LLM_UPSTREAM_ERROR" in message
     assert "private shopping request" not in message
 
 
@@ -576,14 +715,15 @@ def test_supervisor_fallback_log_does_not_include_user_message(caplog: pytest.Lo
         name = "deepseek"
 
         async def extract_intent(self, message: str) -> ShoppingIntent:
-            raise LLMProviderError("provider failure")
+            raise _provider_error()
 
         async def generate_reply(self, message: str, products: list[Product]) -> str:
-            raise LLMProviderError("provider failure")
+            raise _provider_error()
 
     with caplog.at_level(logging.WARNING):
         asyncio.run(ShoppingSupervisor(ProductRepository(), FailingProvider()).run("private shopping request"))
 
     message = next(record.getMessage() for record in caplog.records if record.getMessage().startswith("llm_fallback"))
     assert "provider=deepseek fallback=mock operation=intent" in message
+    assert "error_code=LLM_UPSTREAM_ERROR" in message
     assert "private shopping request" not in message

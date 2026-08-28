@@ -14,8 +14,35 @@ from smart_commerce.services.intent_parser import parse_shopping_intent
 logger = logging.getLogger(__name__)
 
 
+LLMProviderErrorCode = Literal[
+    "LLM_CONFIG_ERROR",
+    "LLM_AUTH_ERROR",
+    "LLM_REQUEST_ERROR",
+    "LLM_RATE_LIMITED",
+    "LLM_UPSTREAM_ERROR",
+    "LLM_NETWORK_ERROR",
+    "LLM_TIMEOUT",
+    "LLM_RESPONSE_INVALID",
+]
+
+
 class LLMProviderError(RuntimeError):
     """Raised when an LLM provider cannot produce a usable answer."""
+
+    def __init__(
+        self,
+        code: LLMProviderErrorCode,
+        message: str,
+        *,
+        status_code: int,
+        public_message: str,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+        self.public_message = public_message
+        self.retryable = retryable
 
 
 class LLMProvider(Protocol):
@@ -28,8 +55,64 @@ class LLMProvider(Protocol):
         """Generate a shopping explanation for the selected products."""
 
 
-def _is_retryable_http_status(status_code: int) -> bool:
-    return status_code == 429 or status_code >= 500
+def _response_invalid_error(message: str) -> LLMProviderError:
+    return LLMProviderError(
+        "LLM_RESPONSE_INVALID",
+        message,
+        status_code=502,
+        public_message="模型服务返回结果异常",
+    )
+
+
+def _http_error(exc: httpx.HTTPStatusError) -> LLMProviderError:
+    status_code = exc.response.status_code
+    if status_code in {401, 403}:
+        return LLMProviderError(
+            "LLM_AUTH_ERROR",
+            f"DeepSeek authentication failed with status {status_code}",
+            status_code=502,
+            public_message="模型服务认证失败",
+        )
+    if status_code == 429:
+        return LLMProviderError(
+            "LLM_RATE_LIMITED",
+            "DeepSeek rate limit exceeded",
+            status_code=503,
+            public_message="模型服务当前繁忙，请稍后重试",
+            retryable=True,
+        )
+    if status_code >= 500:
+        return LLMProviderError(
+            "LLM_UPSTREAM_ERROR",
+            f"DeepSeek upstream failed with status {status_code}",
+            status_code=502,
+            public_message="模型服务暂时不可用",
+            retryable=True,
+        )
+    return LLMProviderError(
+        "LLM_REQUEST_ERROR",
+        f"DeepSeek request failed with status {status_code}",
+        status_code=502,
+        public_message="模型服务请求无效",
+    )
+
+
+def _transport_error(exc: httpx.TimeoutException | httpx.NetworkError) -> LLMProviderError:
+    if isinstance(exc, httpx.TimeoutException):
+        return LLMProviderError(
+            "LLM_TIMEOUT",
+            "DeepSeek request timed out",
+            status_code=504,
+            public_message="模型服务响应超时",
+            retryable=True,
+        )
+    return LLMProviderError(
+        "LLM_NETWORK_ERROR",
+        "DeepSeek network connection failed",
+        status_code=503,
+        public_message="模型服务网络连接失败",
+        retryable=True,
+    )
 
 
 def _extract_usage(data: object) -> tuple[int | None, int | None, int | None]:
@@ -66,6 +149,7 @@ def _log_llm_call(
     completion_tokens: int | None = None,
     total_tokens: int | None = None,
     error_type: str | None = None,
+    error_code: LLMProviderErrorCode | None = None,
 ) -> None:
     message = (
         f"llm_call_{outcome} provider=%s model=%s api_mode=%s duration_ms=%.1f "
@@ -83,14 +167,19 @@ def _log_llm_call(
         total_tokens,
     )
     if outcome == "failed":
-        logger.warning(f"{message} error_type=%s", *values, error_type or "UnknownError")
+        logger.warning(
+            f"{message} error_type=%s error_code=%s",
+            *values,
+            error_type or "UnknownError",
+            error_code or "UNKNOWN_ERROR",
+        )
         return
     logger.info(message, *values)
 
 
 def _extract_responses_text(data: object) -> str:
     if not isinstance(data, dict):
-        raise LLMProviderError("DeepSeek returned an invalid Responses payload")
+        raise _response_invalid_error("DeepSeek returned an invalid Responses payload")
 
     output_text = data.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -114,20 +203,20 @@ def _extract_responses_text(data: object) -> str:
         if text_parts:
             return "\n".join(text_parts)
 
-    raise LLMProviderError("DeepSeek returned an empty Responses output")
+    raise _response_invalid_error("DeepSeek returned an empty Responses output")
 
 
 def _extract_chat_text(data: object) -> str:
     if not isinstance(data, dict):
-        raise LLMProviderError("DeepSeek returned an invalid Chat payload")
+        raise _response_invalid_error("DeepSeek returned an invalid Chat payload")
 
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
-        raise LLMProviderError("DeepSeek returned an invalid Chat payload") from exc
+        raise _response_invalid_error("DeepSeek returned an invalid Chat payload") from exc
 
     if not isinstance(content, str) or not content.strip():
-        raise LLMProviderError("DeepSeek returned an empty Chat response")
+        raise _response_invalid_error("DeepSeek returned an empty Chat response")
     return content.strip()
 
 
@@ -140,7 +229,7 @@ def _parse_shopping_intent_json(content: str) -> ShoppingIntent:
     try:
         return ShoppingIntent.model_validate(json.loads(normalized))
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise LLMProviderError("DeepSeek returned an invalid shopping intent JSON") from exc
+        raise _response_invalid_error("DeepSeek returned an invalid shopping intent JSON") from exc
 
 
 def _mock_reply(message: str, products: list[Product]) -> str:
@@ -225,6 +314,12 @@ class DeepSeekProvider:
         started = time.perf_counter()
         attempts = 0
         if not self.api_key:
+            error = LLMProviderError(
+                "LLM_CONFIG_ERROR",
+                "DeepSeek API key is not configured",
+                status_code=503,
+                public_message="模型服务配置不完整",
+            )
             _log_llm_call(
                 outcome="failed",
                 provider=self.name,
@@ -232,9 +327,10 @@ class DeepSeekProvider:
                 api_mode=self.api_mode,
                 duration_ms=(time.perf_counter() - started) * 1000,
                 attempts=attempts,
-                error_type="LLMProviderError",
+                error_type=type(error).__name__,
+                error_code=error.code,
             )
-            raise LLMProviderError("DeepSeek API key is not configured")
+            raise error
 
         if self.api_mode == "responses":
             payload = {
@@ -261,10 +357,10 @@ class DeepSeekProvider:
             "Content-Type": "application/json",
         }
 
-        last_error: Exception | None = None
+        last_error: LLMProviderError | None = None
+        last_cause: Exception | None = None
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             for attempt in range(self.max_retries + 1):
-                retryable = False
                 try:
                     attempts = attempt + 1
                     response = await client.post(url, headers=headers, json=payload)
@@ -288,15 +384,22 @@ class DeepSeekProvider:
                     )
                     return text
                 except httpx.HTTPStatusError as exc:
+                    last_error = _http_error(exc)
+                    last_cause = exc
+                except httpx.TimeoutException as exc:
+                    last_error = _transport_error(exc)
+                    last_cause = exc
+                except httpx.NetworkError as exc:
+                    last_error = _transport_error(exc)
+                    last_cause = exc
+                except LLMProviderError as exc:
                     last_error = exc
-                    retryable = _is_retryable_http_status(exc.response.status_code)
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                    last_error = exc
-                    retryable = True
-                except (KeyError, IndexError, TypeError, ValueError, LLMProviderError) as exc:
-                    last_error = exc
+                    last_cause = exc.__cause__ if isinstance(exc.__cause__, Exception) else None
+                except (KeyError, IndexError, TypeError, ValueError) as exc:
+                    last_error = _response_invalid_error("DeepSeek returned an invalid response payload")
+                    last_cause = exc
 
-                if not retryable or attempt >= self.max_retries:
+                if not last_error.retryable or attempt >= self.max_retries:
                     break
                 await asyncio.sleep(min(2**attempt, 4))
 
@@ -307,9 +410,17 @@ class DeepSeekProvider:
             api_mode=self.api_mode,
             duration_ms=(time.perf_counter() - started) * 1000,
             attempts=attempts,
-            error_type=type(last_error).__name__ if last_error else "LLMProviderError",
+            error_type=type(last_cause).__name__ if last_cause else "LLMProviderError",
+            error_code=last_error.code if last_error else "LLM_UPSTREAM_ERROR",
         )
-        raise LLMProviderError(f"DeepSeek request failed after retries: {last_error}") from last_error
+        if last_error is None:
+            last_error = LLMProviderError(
+                "LLM_UPSTREAM_ERROR",
+                "DeepSeek request failed without a response",
+                status_code=502,
+                public_message="模型服务暂时不可用",
+            )
+        raise last_error from last_cause
 
 
 def build_llm_provider(

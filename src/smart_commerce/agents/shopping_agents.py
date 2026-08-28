@@ -40,8 +40,9 @@ class ShoppingSupervisor:
             intent = await active_provider.extract_intent(message)
         except LLMProviderError as exc:
             logger.warning(
-                "llm_fallback provider=%s fallback=mock operation=intent reason=provider_error error_type=%s",
+                "llm_fallback provider=%s fallback=mock operation=intent reason=provider_error error_code=%s error_type=%s",
                 active_provider.name,
+                exc.code,
                 type(exc).__name__,
             )
             active_provider = MockLLMProvider()
@@ -53,8 +54,9 @@ class ShoppingSupervisor:
             reply = await active_provider.generate_reply(message, search_result.products)
         except LLMProviderError as exc:
             logger.warning(
-                "llm_fallback provider=%s fallback=mock operation=reply reason=provider_error error_type=%s",
+                "llm_fallback provider=%s fallback=mock operation=reply reason=provider_error error_code=%s error_type=%s",
                 active_provider.name,
+                exc.code,
                 type(exc).__name__,
             )
             reply = await MockLLMProvider().generate_reply(message, search_result.products)

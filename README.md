@@ -239,7 +239,9 @@ docker compose down -v
 Copy-Item .env.example .env
 ```
 
-默认 `.env.example` 使用不需要密钥的 Mock 模式。本机接入 DeepSeek 时，配置 `LLM_PROVIDER=deepseek`、`LLM_API_KEY` 和 `LLM_MODEL=deepseekflash`。协议默认使用 Chat Completions；DeepSeek 的 Responses API 可以通过 `LLM_API_MODE=responses` 选择。API 请求失败会按配置重试，仍失败时自动回退到 Mock，避免购物演示整体不可用。密钥只放在本机 `.env`，不要提交到 Git。
+默认 `.env.example` 使用不需要密钥的 Mock 模式。本机接入 DeepSeek 时，配置 `LLM_PROVIDER=deepseek`、`LLM_API_KEY` 和 `LLM_MODEL=deepseekflash`。协议默认使用 Chat Completions；DeepSeek 的 Responses API 可以通过 `LLM_API_MODE=responses` 选择。聊天链路遇到模型服务失败时会自动回退到 Mock，避免购物演示整体不可用；仅对限流、上游 5xx、网络和超时错误重试，不会重试认证、请求参数或响应格式错误。密钥只放在本机 `.env`，不要提交到 Git。
+
+管理员连接测试会按统一错误体返回稳定的模型服务错误码：`LLM_CONFIG_ERROR`、`LLM_AUTH_ERROR`、`LLM_REQUEST_ERROR`、`LLM_RATE_LIMITED`、`LLM_UPSTREAM_ERROR`、`LLM_NETWORK_ERROR`、`LLM_TIMEOUT` 和 `LLM_RESPONSE_INVALID`。这类错误不会泄露 API Key、上游响应内容或测试请求正文。
 
 身份验证模式使用 `ENVIRONMENT`、`IDENTITY_MODE` 和 `IDENTITY_GATEWAY_TOKEN` 配置。默认的 `ENVIRONMENT=development` 与 `IDENTITY_MODE=development` 仅适合本地匿名开发；任何非 `development` 环境都会强制要求网关令牌和完整身份头。
 

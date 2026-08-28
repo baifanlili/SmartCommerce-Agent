@@ -4,6 +4,7 @@ import secrets
 from fastapi import APIRouter, Header, Query, Request
 
 from smart_commerce.core.errors import ApiError
+from smart_commerce.services.llm_provider import LLMProviderError
 from smart_commerce.models.schemas import (
     AdminConnectionTestResponse,
     AdminLLMConfigView,
@@ -84,9 +85,13 @@ async def test_admin_llm_config(
     try:
         products = request.app.state.product_repository.list_products()[:1]
         await provider.generate_reply("测试管理员配置", products)
-    except Exception:
-        logger.warning("admin_llm_connection_test_failed provider=%s", candidate.provider, exc_info=True)
-        return AdminConnectionTestResponse(ok=False, message="连接测试失败，当前配置未启用", mode="mock")
+    except LLMProviderError as exc:
+        logger.warning(
+            "admin_llm_connection_test_failed provider=%s error_code=%s",
+            candidate.provider,
+            exc.code,
+        )
+        raise ApiError(exc.status_code, exc.code, exc.public_message) from exc
     mode = "mock" if provider.name == "mock" else "llm"
     return AdminConnectionTestResponse(ok=True, message="连接测试成功", mode=mode)
 

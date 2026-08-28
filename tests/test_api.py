@@ -4,7 +4,7 @@ import pytest
 from smart_commerce.main import app
 from smart_commerce.agents.shopping_agents import ShoppingSupervisor
 from smart_commerce.core.identity import IdentityContext
-from smart_commerce.services.llm_provider import MockLLMProvider
+from smart_commerce.services.llm_provider import LLMProviderError, MockLLMProvider
 from smart_commerce.services.session_memory import SessionMemory
 
 
@@ -230,12 +230,19 @@ def test_admin_config_is_masked_and_can_be_enabled(client) -> None:
 
 def test_admin_config_test_failure_does_not_enable_draft(client, monkeypatch: pytest.MonkeyPatch) -> None:
     headers = {"X-Admin-Token": "test-admin-token"}
+    was_active = app.state.llm_config_store.view().is_active
 
     class FailingProvider:
         name = "deepseek"
 
         async def generate_reply(self, message, products):
-            raise RuntimeError("provider unavailable")
+            raise LLMProviderError(
+                "LLM_TIMEOUT",
+                "provider unavailable",
+                status_code=504,
+                public_message="模型服务响应超时",
+                retryable=True,
+            )
 
     monkeypatch.setattr(
         app.state.llm_config_store,
@@ -248,5 +255,10 @@ def test_admin_config_test_failure_does_not_enable_draft(client, monkeypatch: py
         json={"provider": "deepseek", "api_key": "candidate-key"},
     )
 
-    assert response.status_code == 200
-    assert response.json() == {"ok": False, "message": "连接测试失败，当前配置未启用", "mode": "mock"}
+    assert response.status_code == 504
+    error = response.json()["error"]
+    assert error["code"] == "LLM_TIMEOUT"
+    assert error["message"] == "模型服务响应超时"
+    assert error["request_id"] == response.headers["x-request-id"]
+    assert "candidate-key" not in response.text
+    assert app.state.llm_config_store.view().is_active is was_active

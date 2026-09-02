@@ -1,9 +1,12 @@
+import json
 import logging
 import secrets
 
 from fastapi import APIRouter, Header, Query, Request
+from fastapi.responses import StreamingResponse
 
-from smart_commerce.core.errors import ApiError
+from smart_commerce.agents.shopping_agents import StreamDeltaEvent, StreamDoneEvent, StreamStepEvent
+from smart_commerce.core.errors import ApiError, _request_ids
 from smart_commerce.services.llm_provider import LLMProviderError
 from smart_commerce.models.schemas import (
     AdminConnectionTestResponse,
@@ -52,6 +55,97 @@ async def chat(payload: ChatRequest, request: Request) -> ChatResponse:
     )
     logger.info("chat_completed session_id=%s user_id=%s tenant_id=%s recommendations=%d mode=%s", payload.session_id, identity.user_id, identity.tenant_id, len(search_result.products), mode)
     return response
+
+def _sse(event: str, data: dict) -> str:
+    import json
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.post("/chat/stream")
+async def chat_stream(payload: ChatRequest, request: Request) -> StreamingResponse:
+    identity = request.state.identity
+    logger.info(
+        "chat_stream_started session_id=%s user_id=%s tenant_id=%s message_chars=%d",
+        payload.session_id,
+        identity.user_id,
+        identity.tenant_id,
+        len(payload.message),
+    )
+    memory = request.app.state.session_memory
+    await memory.append(identity, payload.session_id, "user", payload.message)
+    request_id, trace_id = _request_ids(request)
+
+    async def event_source():
+        try:
+            async for event in request.app.state.supervisor.stream_run(payload.message):
+                if isinstance(event, StreamStepEvent):
+                    yield _sse(
+                        "step",
+                        {
+                            "agent": event.agent,
+                            "label": event.label,
+                            "status": event.status,
+                            "request_id": request_id,
+                            "trace_id": trace_id,
+                        },
+                    )
+                elif isinstance(event, StreamDeltaEvent):
+                    yield _sse(
+                        "delta",
+                        {
+                            "text": event.text,
+                            "request_id": request_id,
+                            "trace_id": trace_id,
+                        },
+                    )
+                elif isinstance(event, StreamDoneEvent):
+                    await memory.append(identity, payload.session_id, "assistant", event.reply)
+                    yield _sse(
+                        "done",
+                        {
+                            "session_id": payload.session_id,
+                            "reply": event.reply,
+                            "intent": event.search_result.intent.model_dump(),
+                            "recommendations": [product.model_dump() for product in event.search_result.products],
+                            "steps": [step.model_dump() for step in event.steps],
+                            "mode": event.mode,
+                            "request_id": request_id,
+                            "trace_id": trace_id,
+                        },
+                    )
+        except Exception:
+            logger.exception(
+                "chat_stream_failed session_id=%s user_id=%s tenant_id=%s",
+                payload.session_id,
+                identity.user_id,
+                identity.tenant_id,
+            )
+            yield _sse(
+                "error",
+                {
+                    "code": "INTERNAL_ERROR",
+                    "message": "服务器内部错误",
+                    "request_id": request_id,
+                    "trace_id": trace_id,
+                },
+            )
+        finally:
+            logger.info(
+                "chat_stream_completed session_id=%s user_id=%s tenant_id=%s",
+                payload.session_id,
+                identity.user_id,
+                identity.tenant_id,
+            )
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/admin/llm-config", response_model=AdminLLMConfigView)

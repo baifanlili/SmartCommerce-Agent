@@ -1,4 +1,6 @@
 import logging
+from dataclasses import dataclass
+from typing import AsyncIterator, Literal
 
 from smart_commerce.core.config import Settings
 from smart_commerce.models.schemas import AgentStep, Product, ProductSearchResult, ShoppingIntent
@@ -7,6 +9,32 @@ from smart_commerce.services.intent_parser import parse_shopping_intent
 from smart_commerce.services.llm_provider import LLMProvider, LLMProviderError, MockLLMProvider, build_llm_provider
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class StreamStepEvent:
+    agent: str
+    label: str
+    status: Literal["running", "completed"]
+
+
+@dataclass(frozen=True)
+class StreamDeltaEvent:
+    text: str
+
+
+@dataclass(frozen=True)
+class StreamDoneEvent:
+    reply: str
+    search_result: ProductSearchResult
+    steps: list[AgentStep]
+    mode: str
+
+
+def _chunk_text(text: str, size: int = 12) -> list[str]:
+    if not text:
+        return []
+    return [text[index : index + size] for index in range(0, len(text), size)]
 
 
 class ProductAgent:
@@ -67,6 +95,55 @@ class ShoppingSupervisor:
             AgentStep(agent="recommend", label="智能推荐"),
         ]
         return reply, search_result, steps, mode
+
+    async def stream_run(
+        self,
+        message: str,
+    ) -> AsyncIterator[StreamStepEvent | StreamDeltaEvent | StreamDoneEvent]:
+        active_provider = self.llm_provider
+        mode = "mock" if active_provider.name == "mock" else "llm"
+
+        yield StreamStepEvent(agent="supervisor", label="需求理解", status="running")
+        try:
+            intent = await active_provider.extract_intent(message)
+        except LLMProviderError as exc:
+            logger.warning(
+                "llm_fallback provider=%s fallback=mock operation=intent reason=provider_error error_code=%s error_type=%s",
+                active_provider.name,
+                exc.code,
+                type(exc).__name__,
+            )
+            active_provider = MockLLMProvider()
+            intent = await active_provider.extract_intent(message)
+            mode = "mock"
+        yield StreamStepEvent(agent="supervisor", label="需求理解", status="completed")
+
+        yield StreamStepEvent(agent="product", label="商品检索", status="running")
+        search_result = self.product_agent.search(intent)
+        yield StreamStepEvent(agent="product", label="商品检索", status="completed")
+
+        yield StreamStepEvent(agent="recommend", label="智能推荐", status="running")
+        try:
+            reply = await active_provider.generate_reply(message, search_result.products)
+        except LLMProviderError as exc:
+            logger.warning(
+                "llm_fallback provider=%s fallback=mock operation=reply reason=provider_error error_code=%s error_type=%s",
+                active_provider.name,
+                exc.code,
+                type(exc).__name__,
+            )
+            reply = await MockLLMProvider().generate_reply(message, search_result.products)
+            mode = "mock"
+        yield StreamStepEvent(agent="recommend", label="智能推荐", status="completed")
+
+        steps = [
+            AgentStep(agent="supervisor", label="需求理解"),
+            AgentStep(agent="product", label="商品检索"),
+            AgentStep(agent="recommend", label="智能推荐"),
+        ]
+        for chunk in _chunk_text(reply):
+            yield StreamDeltaEvent(chunk)
+        yield StreamDoneEvent(reply=reply, search_result=search_result, steps=steps, mode=mode)
 
 
 def supervisor_from_settings(repository: ProductRepository, settings: Settings) -> ShoppingSupervisor:

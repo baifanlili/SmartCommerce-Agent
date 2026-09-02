@@ -21,7 +21,7 @@ import {
   Star,
   UserRound,
 } from 'lucide-react'
-import type { AdminConnectionTest, AdminLLMConfig, ChatResponse, Message, Product } from './types'
+import type { AdminConnectionTest, AdminLLMConfig, ChatResponse, ChatStreamDone, ChatStreamEvent, Message, Product } from './types'
 
 const quickPrompts = [
   { label: '程序员电脑', text: '推荐一台5000元以内适合程序员的笔记本', icon: Laptop },
@@ -42,6 +42,22 @@ const initialMessage: Message = {
   content: '你好，我是你的购物研究助手。告诉我预算、使用场景或在意的参数，我会帮你筛选并解释推荐理由。',
 }
 
+function parseStreamEvent(frame: string): ChatStreamEvent | null {
+  let event = ''
+  const dataLines: string[] = []
+  for (const line of frame.split('\n')) {
+    if (line.startsWith('event:')) event = line.slice(6).trim()
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+  }
+  if (!event || !dataLines.length) return null
+  try {
+    return { event, data: JSON.parse(dataLines.join('\n')) } as ChatStreamEvent
+  } catch {
+    return null
+  }
+}
+
+
 function App() {
   const [messages, setMessages] = useState<Message[]>([initialMessage])
   const [input, setInput] = useState('')
@@ -61,22 +77,54 @@ function App() {
     if (!message || loading) return
     setInput('')
     setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'user', content: message }])
+    const assistantId = crypto.randomUUID()
+    setMessages((current) => [...current, { id: assistantId, role: 'assistant', content: '' }])
     setLoading(true)
     try {
-      const response = await fetch('/api/v1/chat', {
+      const response = await fetch('/api/v1/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, message }),
       })
-      if (!response.ok) throw new Error('服务暂时不可用')
-      const data: ChatResponse = await response.json()
-      setModelMode(data.mode)
-      setMessages((current) => [
-        ...current,
-        { id: crypto.randomUUID(), role: 'assistant', content: data.reply, recommendations: data.recommendations, steps: data.steps },
-      ])
-    } catch {
-      setMessages((current) => [...current, { id: crypto.randomUUID(), role: 'assistant', content: '连接服务失败，请确认后端已启动后再试一次。' }])
+      if (!response.ok || !response.body) throw new Error('服务暂时不可用')
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let doneEvent: ChatStreamDone | null = null
+      const applyToAssistant = (update: (item: Message) => Message) => {
+        setMessages((current) => current.map((item) => (item.id === assistantId ? update(item) : item)))
+      }
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() ?? ''
+        for (const frame of frames) {
+          const streamEvent = parseStreamEvent(frame)
+          if (!streamEvent) continue
+          if (streamEvent.event === 'step') {
+            applyToAssistant((item) => {
+              const steps = item.steps ?? []
+              const index = steps.findIndex((step) => step.agent === streamEvent.data.agent)
+              const next = { agent: streamEvent.data.agent, label: streamEvent.data.label, status: streamEvent.data.status }
+              return { ...item, steps: index >= 0 ? steps.map((step, i) => (i === index ? next : step)) : [...steps, next] }
+            })
+          } else if (streamEvent.event === 'delta') {
+            applyToAssistant((item) => ({ ...item, content: item.content + streamEvent.data.text }))
+          } else if (streamEvent.event === 'done') {
+            doneEvent = streamEvent.data
+          } else if (streamEvent.event === 'error') {
+            throw new Error(streamEvent.data.message)
+          }
+        }
+      }
+      setModelMode(doneEvent?.mode ?? 'mock')
+      if (doneEvent) {
+        applyToAssistant((item) => ({ ...item, content: doneEvent.reply, recommendations: doneEvent.recommendations, steps: doneEvent.steps }))
+      }
+    } catch (error) {
+      setMessages((current) => current.map((item) => (item.id === assistantId ? { ...item, content: error instanceof Error ? error.message : '连接服务失败，请确认后端已启动后再试一次。' } : item)))
     } finally {
       setLoading(false)
     }
@@ -205,7 +253,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
 }
 
 function MessageBubble({ message }: { message: Message }) {
-  return <div className={`message-row ${message.role === 'user' ? 'user-row' : 'assistant-row'}`}><div className="message-avatar">{message.role === 'user' ? <UserRound size={16} /> : <Bot size={17} />}</div><div className="message-content"><div className="message-meta">{message.role === 'user' ? '你' : 'SmartCommerce Agent'}<span>{message.role === 'assistant' ? '刚刚' : '刚刚'}</span></div><div className="message-bubble">{message.content}</div>{message.steps && <div className="agent-steps">{message.steps.map((step) => <span key={step.agent}><span className="step-check">✓</span>{step.label}</span>)}</div>}</div></div>
+  return <div className={`message-row ${message.role === 'user' ? 'user-row' : 'assistant-row'}`}><div className="message-avatar">{message.role === 'user' ? <UserRound size={16} /> : <Bot size={17} />}</div><div className="message-content"><div className="message-meta">{message.role === 'user' ? '你' : 'SmartCommerce Agent'}<span>{message.role === 'assistant' ? '刚刚' : '刚刚'}</span></div><div className="message-bubble">{message.content}</div>{message.steps && <div className="agent-steps">{message.steps.map((step) => <span key={step.agent}><span className={`step-icon ${step.status === 'running' ? 'running' : ''}`}>{step.status === 'running' ? '…' : '✓'}</span>{step.label}</span>)}</div>}</div></div>
 }
 
 function ProductCard({ product, featured }: { product: Product; featured: boolean }) {

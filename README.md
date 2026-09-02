@@ -186,8 +186,52 @@ X-Agent-Scopes: agent:chat,memory:read:self
 
 该字段是向后兼容的响应扩展。Mock 模式使用确定性规则解析，DeepSeek Chat Completions 和 Responses 模式会要求模型返回同一份 JSON 协议并在服务端校验；模型返回空内容、非法 JSON 或不符合协议时，自动降级为 Mock 解析，保证商品检索链路仍然可用。
 
-## 部署路线
+### 聊天流式响应协议
 
+`POST /api/v1/chat/stream` 使用 SSE 返回逐步事件，方便接入方展示“正在理解需求 → 正在检索商品 → 正在智能推荐”的阶段状态，并逐步渲染回复文本；原来的 `POST /api/v1/chat` 非流式接口保持不变。每条事件统一为 `event: <type>` 加 `data: <json>`，并携带 `request_id` 和 `trace_id`：
+
+| 事件 | 含义 |
+|---|---|
+| `step` | 阶段开始/结束：需求理解、商品检索、智能推荐 |
+| `delta` | 回复文本增量，客户端按顺序拼接即可得到完整回复 |
+| `done` | 结束事件，包含完整回复、意图、推荐列表、步骤和模型模式 |
+| `error` | 流内错误，包含统一错误码和链路标识，事件后流结束 |
+
+请求体与非流式接口一致：
+
+```json
+{
+  "session_id": "demo-session",
+  "message": "推荐一台5000元以内适合程序员的笔记本"
+}
+```
+
+`done` 事件示例：
+
+```json
+{
+  "session_id": "demo-session",
+  "reply": "完整回复文本",
+  "intent": {
+    "name": "product_recommendation",
+    "raw_message": "推荐一台5000元以内适合程序员的笔记本",
+    "filters": {
+      "max_price": 5000,
+      "category": "Laptop",
+      "keywords": ["程序员"]
+    }
+  },
+  "recommendations": [],
+  "steps": [],
+  "mode": "mock",
+  "request_id": "...",
+  "trace_id": "..."
+}
+```
+
+Mock 模式同样按该协议输出可控的增量事件；当前 Web 端通过 `fetch` 的流式读取逐帧解析，不依赖 WebSocket。流内出现未预期异常时，服务端会发送 `error` 事件并结束流，而不是把普通 JSON 错误混进事件流。
+
+## 部署路线
 本地 Compose 是开发和技术验证入口，不等于最终生产拓扑。后续部署按同一份不可变镜像逐级晋级：`main` 合并后构建一次并使用 Commit SHA 或版本号标记，自动部署 `dev`，测试通过后人工批准进入 `uat`，验收通过后人工批准进入 `prod`。环境差异通过环境变量和 Secret 注入，数据库、Redis、消息队列、向量库和模型密钥不写入镜像。
 
 | 环境 | 方式 | 重点 |

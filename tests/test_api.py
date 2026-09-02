@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -9,6 +11,23 @@ from smart_commerce.services.llm_provider import LLMProviderError, MockLLMProvid
 from smart_commerce.services.runtime_config import RuntimeLLMConfigStore
 from smart_commerce.services.session_memory import SessionMemory
 
+
+def _parse_sse(text: str) -> list[dict]:
+    events: list[dict] = []
+    for block in text.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        event_type = ""
+        data_lines: list[str] = []
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event_type = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").strip())
+        if event_type and data_lines:
+            events.append({"type": event_type, "data": json.loads("\n".join(data_lines))})
+    return events
 
 @pytest.fixture()
 def client(tmp_path):
@@ -106,6 +125,53 @@ def test_chat_returns_agent_steps_and_recommendations(client) -> None:
     }
     assert len(payload["steps"]) == 3
     assert payload["recommendations"][0]["name"] == "ThinkPad T14 Gen 5"
+
+def test_chat_stream_emits_sse_events_with_chain_ids(client) -> None:
+    response = client.post(
+        "/api/v1/chat/stream",
+        headers={"X-Request-ID": "stream-req-1", "X-Trace-ID": "stream-trace-1"},
+        json={"session_id": "stream-session", "message": "推荐一台5000元以内适合程序员的笔记本"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["x-request-id"] == "stream-req-1"
+    assert response.headers["x-trace-id"] == "stream-trace-1"
+    events = _parse_sse(response.text)
+    types = [event["type"] for event in events]
+    assert types[0] == "step"
+    assert types.count("step") == 6
+    assert "delta" in types
+    assert types[-1] == "done"
+    assert all(event["data"]["request_id"] == "stream-req-1" for event in events)
+    assert all(event["data"]["trace_id"] == "stream-trace-1" for event in events)
+    delta_text = "".join(event["data"]["text"] for event in events if event["type"] == "delta")
+    done = events[-1]["data"]
+    assert done["session_id"] == "stream-session"
+    assert delta_text == done["reply"]
+    assert done["mode"] == "mock"
+    assert done["intent"]["name"] == "product_recommendation"
+    assert done["intent"]["filters"]["max_price"] == 5000.0
+    assert len(done["steps"]) == 3
+    assert done["recommendations"][0]["name"] == "ThinkPad T14 Gen 5"
+
+
+def test_chat_stream_emits_error_event_when_supervisor_fails(client, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing_stream(message):
+        raise RuntimeError("boom")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(app.state.supervisor, "stream_run", failing_stream)
+    response = client.post(
+        "/api/v1/chat/stream",
+        json={"session_id": "stream-error", "message": "推荐笔记本"},
+    )
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert events[-1]["type"] == "error"
+    error = events[-1]["data"]
+    assert error["code"] == "INTERNAL_ERROR"
+    assert error["request_id"] == response.headers["x-request-id"]
+    assert error["trace_id"] == response.headers["x-trace-id"]
 
 
 def test_development_chat_uses_anonymous_identity_without_headers(client) -> None:

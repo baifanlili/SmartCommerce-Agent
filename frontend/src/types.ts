@@ -17,14 +17,62 @@ export type AgentStep = {
   status: 'completed' | 'running'
 }
 
+export type ChatIntent = {
+  name: 'product_recommendation'
+  raw_message: string
+  filters: {
+    max_price: number | null
+    category: string | null
+    keywords: string[]
+  }
+}
+
 export type ChatResponse = {
   session_id: string
   reply: string
+  intent: ChatIntent
   recommendations: Product[]
   steps: AgentStep[]
   mode: 'mock' | 'llm'
 }
 
+export type ChatStreamStep = {
+  agent: string
+  label: string
+  status: 'running' | 'completed'
+  request_id: string
+  trace_id: string
+}
+
+export type ChatStreamDelta = {
+  text: string
+  request_id: string
+  trace_id: string
+}
+
+export type ChatStreamDone = {
+  session_id: string
+  reply: string
+  intent: ChatIntent
+  recommendations: Product[]
+  steps: AgentStep[]
+  mode: 'mock' | 'llm'
+  request_id: string
+  trace_id: string
+}
+
+export type ChatStreamError = {
+  code: string
+  message: string
+  request_id: string
+  trace_id: string
+}
+
+export type ChatStreamEvent =
+  | { event: 'step'; data: ChatStreamStep }
+  | { event: 'delta'; data: ChatStreamDelta }
+  | { event: 'done'; data: ChatStreamDone }
+  | { event: 'error'; data: ChatStreamError }
 export type Message = {
   id: string
   role: 'user' | 'assistant'

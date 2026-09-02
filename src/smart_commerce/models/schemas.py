@@ -80,6 +80,13 @@ class AdminLLMConfigWrite(BaseModel):
     api_mode: Literal["chat", "responses"] = "chat"
     timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     max_retries: int = Field(default=2, ge=0, le=5)
+    expected_version: int = Field(ge=0)
+
+
+class AdminLLMConfigEnable(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=0)
 
 
 class AdminLLMConfigView(BaseModel):
@@ -92,6 +99,8 @@ class AdminLLMConfigView(BaseModel):
     api_key_configured: bool
     api_key_masked: str | None = None
     is_active: bool
+    draft_version: int
+    active_version: int
 
 
 class AdminConnectionTestResponse(BaseModel):

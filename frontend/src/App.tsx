@@ -151,6 +151,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   const [config, setConfig] = useState<AdminLLMConfig>({
     provider: 'mock', api_mode: 'chat', model: 'deepseekflash', base_url: 'https://api.deepseek.com/v1',
     timeout_seconds: 30, max_retries: 2, api_key_configured: false, api_key_masked: null, is_active: true,
+    draft_version: 1, active_version: 1,
   })
   const [apiKey, setApiKey] = useState('')
   const [message, setMessage] = useState('')
@@ -160,6 +161,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   const payload = () => ({
     provider: config.provider, api_mode: config.api_mode, model: config.model, base_url: config.base_url,
     timeout_seconds: Number(config.timeout_seconds), max_retries: Number(config.max_retries), ...(apiKey ? { api_key: apiKey } : {}),
+    expected_version: config.draft_version,
   })
 
   const readConfig = async () => {
@@ -177,7 +179,8 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
     setBusy(true)
     try {
       const path = action === 'save' ? '/api/v1/admin/llm-config' : action === 'test' ? '/api/v1/admin/llm-config/test' : '/api/v1/admin/llm-config/enable'
-      const response = await fetch(path, { method: 'POST', headers, body: action === 'enable' ? undefined : JSON.stringify(payload()) })
+      const body = action === 'enable' ? JSON.stringify({ expected_version: config.active_version }) : JSON.stringify(payload())
+      const response = await fetch(path, { method: 'POST', headers, body })
       const data = await response.json()
       if (!response.ok) throw new Error(data?.error?.message ?? '操作失败')
       if (action !== 'test') setConfig(data as AdminLLMConfig)

@@ -15,6 +15,10 @@ frontend/vite.config.d.ts
 # Local environment
 .env
 
+# Runtime config persistence
+runtime-config.sqlite3
+runtime-config.sqlite3-*
+
 # Personal Git learning automation (kept out of the public repository)
 .githooks/
 scripts/

@@ -7,6 +7,7 @@ from smart_commerce.core.errors import ApiError
 from smart_commerce.services.llm_provider import LLMProviderError
 from smart_commerce.models.schemas import (
     AdminConnectionTestResponse,
+    AdminLLMConfigEnable,
     AdminLLMConfigView,
     AdminLLMConfigWrite,
     ChatRequest,
@@ -69,7 +70,7 @@ async def save_admin_llm_config(
     x_admin_token: str | None = Header(default=None),
 ) -> AdminLLMConfigView:
     _require_admin(request, x_admin_token)
-    return request.app.state.llm_config_store.save_draft(payload)
+    return request.app.state.llm_config_store.save_draft(payload, payload.expected_version)
 
 
 @router.post("/admin/llm-config/test", response_model=AdminConnectionTestResponse)
@@ -98,12 +99,13 @@ async def test_admin_llm_config(
 
 @router.post("/admin/llm-config/enable", response_model=AdminLLMConfigView)
 async def enable_admin_llm_config(
+    payload: AdminLLMConfigEnable,
     request: Request,
     x_admin_token: str | None = Header(default=None),
 ) -> AdminLLMConfigView:
     _require_admin(request, x_admin_token)
     store = request.app.state.llm_config_store
-    store.enable_draft()
+    store.enable_draft(payload.expected_version)
     request.app.state.supervisor = request.app.state.supervisor.__class__(
         request.app.state.product_repository,
         store.build_provider(),

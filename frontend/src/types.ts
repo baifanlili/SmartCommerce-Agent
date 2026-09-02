@@ -43,6 +43,8 @@ export type AdminLLMConfig = {
   api_key_configured: boolean
   api_key_masked: string | null
   is_active: boolean
+  draft_version: number
+  active_version: number
 }
 
 export type AdminConnectionTest = {

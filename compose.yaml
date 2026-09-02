@@ -16,8 +16,12 @@ services:
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
       LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      RUNTIME_CONFIG_DB_PATH: /app/var/runtime-config.sqlite3
+      RUNTIME_CONFIG_ENCRYPTION_KEY: ${RUNTIME_CONFIG_ENCRYPTION_KEY:-}
     ports:
       - "${API_PORT:-8000}:8000"
+    volumes:
+      - runtime-config-data:/app/var
     depends_on:
       redis:
         condition: service_healthy
@@ -45,6 +49,8 @@ services:
       LLM_API_MODE: chat
       LLM_TIMEOUT_SECONDS: 30
       LLM_MAX_RETRIES: 2
+      RUNTIME_CONFIG_DB_PATH: /tmp/runtime-config-test.sqlite3
+      RUNTIME_CONFIG_ENCRYPTION_KEY: ""
     depends_on:
       redis:
         condition: service_healthy
@@ -83,3 +89,4 @@ services:
 
 volumes:
   redis-data:
+  runtime-config-data:

@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     llm_max_retries: int = Field(default=2, ge=0, le=5)
     admin_token: str | None = None
+    runtime_config_db_path: str = "runtime-config.sqlite3"
+    runtime_config_encryption_key: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

@@ -3,24 +3,36 @@ import pytest
 
 from smart_commerce.main import app
 from smart_commerce.agents.shopping_agents import ShoppingSupervisor
+from smart_commerce.core.config import Settings
 from smart_commerce.core.identity import IdentityContext
 from smart_commerce.services.llm_provider import LLMProviderError, MockLLMProvider
+from smart_commerce.services.runtime_config import RuntimeLLMConfigStore
 from smart_commerce.services.session_memory import SessionMemory
 
 
 @pytest.fixture()
-def client():
+def client(tmp_path):
     app.state.settings.admin_token = "test-admin-token"
     app.state.settings.environment = "development"
     app.state.settings.identity_mode = "development"
     app.state.settings.identity_gateway_token = None
-    app.state.supervisor = ShoppingSupervisor(app.state.product_repository, MockLLMProvider())
+    store = RuntimeLLMConfigStore(
+        Settings(
+            _env_file=None,
+            environment="development",
+            llm_provider="mock",
+            runtime_config_db_path=str(tmp_path / "runtime-config.sqlite3"),
+        )
+    )
+    app.state.llm_config_store = store
+    app.state.supervisor = ShoppingSupervisor(app.state.product_repository, store.build_provider())
     with TestClient(app) as test_client:
         yield test_client
     app.state.settings.admin_token = None
     app.state.settings.environment = "development"
     app.state.settings.identity_mode = "development"
     app.state.settings.identity_gateway_token = None
+    app.state.supervisor = ShoppingSupervisor(app.state.product_repository, MockLLMProvider())
 
 
 def test_liveness_does_not_require_redis(client) -> None:
@@ -210,6 +222,7 @@ def test_admin_config_is_masked_and_can_be_enabled(client) -> None:
             "api_mode": "responses",
             "timeout_seconds": 15,
             "max_retries": 1,
+            "expected_version": 1,
         },
     )
 
@@ -218,12 +231,76 @@ def test_admin_config_is_masked_and_can_be_enabled(client) -> None:
     assert saved["api_key_configured"] is True
     assert saved["api_key_masked"] == "tes...key"
     assert "test-secret-key" not in save_response.text
+    assert saved["draft_version"] == 2
+    assert saved["active_version"] == 1
 
-    enable_response = client.post("/api/v1/admin/llm-config/enable", headers=headers)
+    enable_response = client.post(
+        "/api/v1/admin/llm-config/enable",
+        headers=headers,
+        json={"expected_version": saved["active_version"]},
+    )
 
     assert enable_response.status_code == 200
-    assert enable_response.json()["is_active"] is True
+    enabled = enable_response.json()
+    assert enabled["is_active"] is True
+    assert enabled["draft_version"] == 2
+    assert enabled["active_version"] == 2
     assert app.state.supervisor.llm_provider.name == "deepseek"
+
+    app.state.supervisor = ShoppingSupervisor(app.state.product_repository, MockLLMProvider())
+
+
+def test_admin_config_save_conflict_returns_409(client) -> None:
+    headers = {"X-Admin-Token": "test-admin-token"}
+    payload = {
+        "provider": "deepseek",
+        "api_key": "candidate-key",
+        "model": "deepseekflash",
+        "base_url": "https://example.test/v1",
+        "api_mode": "chat",
+        "timeout_seconds": 15,
+        "max_retries": 1,
+        "expected_version": 1,
+    }
+    first = client.post("/api/v1/admin/llm-config", headers=headers, json=payload)
+    assert first.status_code == 200
+
+    stale = client.post("/api/v1/admin/llm-config", headers=headers, json=payload)
+
+    assert stale.status_code == 409
+    error = stale.json()["error"]
+    assert error["code"] == "CONFIG_VERSION_CONFLICT"
+    assert error["details"][0]["message"] == "当前版本为 2"
+    assert "candidate-key" not in stale.text
+
+
+def test_admin_config_enable_conflict_returns_409(client) -> None:
+    headers = {"X-Admin-Token": "test-admin-token"}
+    save = client.post(
+        "/api/v1/admin/llm-config",
+        headers=headers,
+        json={
+            "provider": "deepseek",
+            "api_key": "candidate-key",
+            "expected_version": 1,
+        },
+    )
+    assert save.status_code == 200
+    enable = client.post(
+        "/api/v1/admin/llm-config/enable",
+        headers=headers,
+        json={"expected_version": 1},
+    )
+    assert enable.status_code == 200
+
+    stale = client.post(
+        "/api/v1/admin/llm-config/enable",
+        headers=headers,
+        json={"expected_version": 1},
+    )
+
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "CONFIG_VERSION_CONFLICT"
 
     app.state.supervisor = ShoppingSupervisor(app.state.product_repository, MockLLMProvider())
 
@@ -231,6 +308,7 @@ def test_admin_config_is_masked_and_can_be_enabled(client) -> None:
 def test_admin_config_test_failure_does_not_enable_draft(client, monkeypatch: pytest.MonkeyPatch) -> None:
     headers = {"X-Admin-Token": "test-admin-token"}
     was_active = app.state.llm_config_store.view().is_active
+    draft_version = app.state.llm_config_store.view().draft_version
 
     class FailingProvider:
         name = "deepseek"
@@ -252,7 +330,7 @@ def test_admin_config_test_failure_does_not_enable_draft(client, monkeypatch: py
     response = client.post(
         "/api/v1/admin/llm-config/test",
         headers=headers,
-        json={"provider": "deepseek", "api_key": "candidate-key"},
+        json={"provider": "deepseek", "api_key": "candidate-key", "expected_version": draft_version},
     )
 
     assert response.status_code == 504

@@ -245,7 +245,7 @@ Copy-Item .env.example .env
 
 身份验证模式使用 `ENVIRONMENT`、`IDENTITY_MODE` 和 `IDENTITY_GATEWAY_TOKEN` 配置。默认的 `ENVIRONMENT=development` 与 `IDENTITY_MODE=development` 仅适合本地匿名开发；任何非 `development` 环境都会强制要求网关令牌和完整身份头。
 
-模型配置既可以通过环境变量注入，也可以在管理员配置台中运行期调整。配置台支持 Mock/DeepSeek、Chat Completions/Responses、模型名称、Base URL、超时、重试次数、连接测试、保存草稿和启用配置；API Key 只接收和使用，读取时仅返回脱敏结果。管理员接口需要 `X-Admin-Token`，由 `ADMIN_TOKEN` 注入。当前配置草稿和启用状态仅保存在单个 API 进程内，尚未接入加密持久化、管理员账号体系、审计日志和多副本同步，因此只适合作为 v0.2 的开发验证能力。
+模型配置既可以通过环境变量注入，也可以在管理员配置台中运行期调整。配置台支持 Mock/DeepSeek、Chat Completions/Responses、模型名称、Base URL、超时、重试次数、连接测试、保存草稿和启用配置；API Key 只接收和使用，读取时仅返回脱敏结果。管理员接口需要 `X-Admin-Token`，由 `ADMIN_TOKEN` 注入。草稿和启用配置持久化在本地 SQLite 单文件中，API Key 使用 Fernet 加密后落库，保存草稿和启用配置都携带版本号做乐观并发控制，版本冲突返回 `409 CONFIG_VERSION_CONFLICT`。本地未配置 `RUNTIME_CONFIG_ENCRYPTION_KEY` 时仅 `development` 环境使用内置开发密钥；非 `development` 环境必须注入稳定密钥，生产环境由 Secret Manager 提供。当前 SQLite 单文件方案适合 Docker 单实例验证，多副本配置同步、管理员账号体系、审计日志和密钥轮换仍由后续版本负责。
 
 ## 本地开发
 
